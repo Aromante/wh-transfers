@@ -1,0 +1,27 @@
+name = "transfers-worker"
+main = "src/index.ts"
+compatibility_date = "2024-10-01"
+
+[vars]
+## Non-secret vars. You can also set these per env.
+# SUPABASE_URL = "https://<project>.supabase.co"
+# CORS_ORIGIN = "https://<shell-domain>"
+
+# Secrets needed:
+# - SUPABASE_SERVICE_ROLE (secret)
+# - ODOO_URL
+# - ODOO_DB
+# - ODOO_UID
+# - ODOO_API_KEY (or password)
+
+[env.staging]
+name = "transfers-worker-staging"
+[env.staging.vars]
+# SUPABASE_URL = "https://<project>.supabase.co"
+# CORS_ORIGIN = "http://127.0.0.1:8085"
+
+[env.production]
+name = "transfers-worker"
+[env.production.vars]
+# SUPABASE_URL = "https://<project>.supabase.co"
+# CORS_ORIGIN = "https://<shell-domain>"

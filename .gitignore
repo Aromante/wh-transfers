@@ -1,0 +1,19 @@
+# Node / Vite
+node_modules/
+dist/
+
+# Local envs
+.env
+.env.local
+.env.*.local
+
+# Supabase local artifacts (if any)
+supabase/.temp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Worker local dev vars
+worker/.dev.vars
+
