@@ -2,17 +2,19 @@ import React, { useEffect, useRef, useState } from 'react'
 
 type Props = {
   onScan: (code: string) => void
+  autoFocusEnabled?: boolean
 }
 
-export default function ScannerInput({ onScan }: Props) {
+export default function ScannerInput({ onScan, autoFocusEnabled = true }: Props) {
   const [value, setValue] = useState('')
   const ref = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
+    if (!autoFocusEnabled) return
     ref.current?.focus()
-    const id = setInterval(() => ref.current?.focus(), 1500) // mantener foco
+    const id = setInterval(() => ref.current?.focus(), 6000) // mantener foco (cada 6s)
     return () => clearInterval(id)
-  }, [])
+  }, [autoFocusEnabled])
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -33,4 +35,3 @@ export default function ScannerInput({ onScan }: Props) {
     />
   )
 }
-

@@ -9,6 +9,7 @@ export interface Env {
   ODOO_AUTO_VALIDATE?: string
   SHOPIFY_STORE?: string
   SHOPIFY_ACCESS_TOKEN?: string
+  SHOPIFY_REPLICATE_TRANSFERS?: string
 }
 
 const ALLOWED_LOCATION_CODES = [
@@ -224,6 +225,17 @@ async function sbGetByClientId(env: Env, clientId: string) {
   return r.json()
 }
 
+async function sbGetTransfer(env: Env, id: string) {
+  const r = await fetch(`${env.SUPABASE_URL}/rest/v1/transfers?id=eq.${encodeURIComponent(id)}&select=*`, { method: 'GET', headers: sbHeaders(env) })
+  if (!r.ok) throw new Error(await r.text())
+  const rows = await r.json()
+  return rows?.[0] || null
+}
+
+async function sbInsertShopifyDraft(env: Env, draft: any) {
+  return sbInsert(env, 'shopify_transfer_drafts', [draft])
+}
+
 // ---------------- SHOPIFY HELPERS ----------------
 async function shopifyGraphQL(env: Env, query: string, variables?: Record<string, any>) {
   if (!env.SHOPIFY_STORE || !env.SHOPIFY_ACCESS_TOKEN) throw new Error('Shopify no configurado')
@@ -285,6 +297,30 @@ async function getAvailableAtLocation(env: Env, inventoryItemGid: string, locati
   const data = await shopifyRest(env, '/inventory_levels.json', { inventory_item_ids: itemId, location_ids: locId })
   const lvl = Array.isArray(data?.inventory_levels) ? data.inventory_levels[0] : null
   return Number(lvl?.available ?? 0)
+}
+
+async function createShopifyTransferDraft(env: Env, originLocGid: string, destLocGid: string, lines: { inventoryItemId: string, quantity: number }[]) {
+  // Try GraphQL Admin mutation for inventory transfer creation (may vary by API version/tenant)
+  const mutation = `mutation CreateTransfer($input: InventoryTransferCreateInput!) {
+    inventoryTransferCreate(input: $input) {
+      transfer { id name status }
+      userErrors { field message }
+    }
+  }`
+  const input = {
+    originLocationId: originLocGid,
+    destinationLocationId: destLocGid,
+    lineItems: lines.map(l => ({ inventoryItemId: l.inventoryItemId, quantity: l.quantity })),
+    // Some tenants require a name or note; optional
+  }
+  const data = await shopifyGraphQL(env, mutation, { input })
+  const res = data?.inventoryTransferCreate
+  if (res?.userErrors && res.userErrors.length) {
+    throw new Error(`Shopify userErrors: ${JSON.stringify(res.userErrors)}`)
+  }
+  const tr = res?.transfer
+  if (!tr?.id) throw new Error('Shopify did not return transfer id')
+  return { id: tr.id, name: tr.name || null, status: tr.status || 'DRAFT' }
 }
 
 // ---------------- HANDLERS ----------------
@@ -406,7 +442,66 @@ async function createTransfer(req: Request, env: Env) {
     })))
     await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'odoo_created', detail: { pickingId, pickingName, state: pickingState } }])
 
-    return json({ ok: true, id: transferId, odoo_picking_id: String(pickingId), picking_name: pickingName, status: 'odoo_created' }, { headers: cors })
+    // Replicar a Shopify como draft si aplica (excepto KRONI/Existencias)
+    try {
+      const replicateFlag = String(env.SHOPIFY_REPLICATE_TRANSFERS || '1')
+      if ((replicateFlag === '1' || replicateFlag.toLowerCase() === 'true') && env.SHOPIFY_STORE && env.SHOPIFY_ACCESS_TOKEN) {
+        if (dest_id !== 'KRONI/Existencias') {
+          const originLoc = await getShopifyLocationGid(env, origin_id)
+          const destLoc = await getShopifyLocationGid(env, dest_id)
+          const draftId = crypto.randomUUID()
+          const draftLines: any[] = []
+          const createLines: { inventoryItemId: string, quantity: number }[] = []
+          for (const ln of lines) {
+            const code = String(ln.barcode || ln.sku || '').trim()
+            const qty = Number(ln.qty || 0)
+            if (!code || qty <= 0) continue
+            const variant = await resolveVariantByCode(env, code)
+            const invItemId = variant?.inventoryItem?.id || null
+            draftLines.push({ code, qty, variantId: variant?.id || null, inventoryItemId: invItemId })
+            if (invItemId) createLines.push({ inventoryItemId: invItemId, quantity: qty })
+          }
+          await sbInsertShopifyDraft(env, {
+            id: draftId,
+            transfer_id: transferId,
+            origin_code: origin_id,
+            dest_code: dest_id,
+            origin_shopify_location_id: originLoc,
+            dest_shopify_location_id: destLoc,
+            lines: draftLines,
+            status: 'pending',
+            notes: 'Created by wh-transfers (draft for manual validation in Shopify)'
+          })
+          // Try automatic draft creation in Shopify
+          try {
+            const created = await createShopifyTransferDraft(env, originLoc, destLoc, createLines)
+            // Update record with shopify_transfer_id and status
+            await fetch(`${env.SUPABASE_URL}/rest/v1/shopify_transfer_drafts?id=eq.${encodeURIComponent(draftId)}`, {
+              method: 'PATCH',
+              headers: { ...sbHeaders(env), prefer: 'return=representation' },
+              body: JSON.stringify({ shopify_transfer_id: created.id, status: 'created' })
+            })
+            await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'shopify_draft_created', detail: { shopify_transfer_id: created.id, name: created.name, status: created.status } }])
+          } catch (e) {
+            await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'shopify_draft_create_failed', detail: { error: String((e as any)?.message || e) } }])
+          }
+        }
+      }
+    } catch (e) {
+      await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'shopify_draft_error', detail: { error: String((e as any)?.message || e) } }])
+    }
+
+    // Response: include shopify draft info for UI
+    const resp: any = { ok: true, id: transferId, odoo_picking_id: String(pickingId), picking_name: pickingName, status: pickingState === 'done' ? 'validated' : 'odoo_created' }
+    try {
+      const r3 = await fetch(`${env.SUPABASE_URL}/rest/v1/shopify_transfer_drafts?transfer_id=eq.${encodeURIComponent(transferId)}&select=shopify_transfer_id,status`, { method: 'GET', headers: sbHeaders(env) })
+      if (r3.ok) {
+        const rows = await r3.json()
+        const d = rows?.[0]
+        if (d) resp.shopify_draft = { created: Boolean(d.shopify_transfer_id), id: d.shopify_transfer_id || null, status: d.status }
+      }
+    } catch {}
+    return json(resp, { headers: cors })
   } catch (e: any) {
     return json({ error: String(e?.message || e) }, { status: 500, headers: cors })
   }
@@ -460,6 +555,26 @@ export default {
 
     if (req.method === 'POST' && pathname === '/api/transfers') {
       return createTransfer(req, env)
+    }
+
+    if (req.method === 'GET' && pathname.match(/^\/api\/transfers\/([^/]+)\/shopify-draft\.csv$/)) {
+      const id = pathname.split('/')[3]
+      try {
+        const tr = await sbGetTransfer(env, id)
+        if (!tr) return new Response('Not found', { status: 404, headers: corsHeaders(env.CORS_ORIGIN) })
+        const r2 = await fetch(`${env.SUPABASE_URL}/rest/v1/shopify_transfer_drafts?transfer_id=eq.${encodeURIComponent(id)}&select=*`, { method: 'GET', headers: sbHeaders(env) })
+        if (!r2.ok) throw new Error(await r2.text())
+        const rows = await r2.json()
+        const draft = rows?.[0]
+        const lines = Array.isArray(draft?.lines) ? draft.lines : []
+        let csv = 'code,qty,origin_shopify_location_id,dest_shopify_location_id\n'
+        for (const ln of lines) {
+          csv += `${ln.code},${ln.qty},${draft?.origin_shopify_location_id || ''},${draft?.dest_shopify_location_id || ''}\n`
+        }
+        return new Response(csv, { status: 200, headers: { 'content-type': 'text/csv', 'content-disposition': `attachment; filename="shopify_draft_${id}.csv"`, ...corsHeaders(env.CORS_ORIGIN) } })
+      } catch (e: any) {
+        return json({ error: String(e?.message || e) }, { status: 500, headers: corsHeaders(env.CORS_ORIGIN) })
+      }
     }
 
     if (req.method === 'GET' && pathname.startsWith('/api/transfers/')) {

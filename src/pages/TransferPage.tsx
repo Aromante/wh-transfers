@@ -24,6 +24,9 @@ export default function TransferPage() {
   const [lines, setLines] = useState<Line[]>([])
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<any>(null)
+  const [autoFocus, setAutoFocus] = useState<boolean>(() => {
+    try { return localStorage.getItem('wh_auto_focus') !== '0' } catch { return true }
+  })
 
   useEffect(() => {
     if (locations.length) {
@@ -98,7 +101,8 @@ export default function TransferPage() {
       })
       const data = await r.json()
       if (r.ok) {
-        setResult({ ok: true, kind: 'success', pickingName: (data as any)?.picking_name, pickingId: (data as any)?.odoo_picking_id, status: (data as any)?.status })
+        const shopify = (data as any)?.shopify_draft || null
+        setResult({ ok: true, kind: 'success', id: (data as any)?.id, pickingName: (data as any)?.picking_name, pickingId: (data as any)?.odoo_picking_id, status: (data as any)?.status, shopify })
       } else if (Array.isArray((data as any)?.insufficient)) {
         setResult({ ok: false, kind: 'insufficient', insufficient: (data as any).insufficient, origin })
       } else {
@@ -115,7 +119,21 @@ export default function TransferPage() {
       <div className="mb-6">
         <div className="font-suisseMono text-xs text-slate-500">OPERACIONES</div>
         <h1 className="mt-1 text-3xl font-semibold tracking-tight">Nueva transferencia</h1>
-        <p className="text-slate-600 mt-1">Escanea productos y confirma para crear el picking en Odoo.</p>
+        <div className="mt-2 flex items-center justify-between gap-4">
+          <p className="text-slate-600">Escanea productos y confirma para crear el picking en Odoo.</p>
+          <label className="flex items-center gap-2 text-sm select-none">
+            <input
+              type="checkbox"
+              checked={autoFocus}
+              onChange={(e) => {
+                const val = e.target.checked
+                setAutoFocus(val)
+                try { localStorage.setItem('wh_auto_focus', val ? '1' : '0') } catch {}
+              }}
+            />
+            <span>Auto‑enfoque del escáner</span>
+          </label>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -153,7 +171,7 @@ export default function TransferPage() {
       </div>
 
       <div className="mt-4">
-        <ScannerInput onScan={onScan} />
+        <ScannerInput onScan={onScan} autoFocusEnabled={autoFocus} />
       </div>
 
       <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white">
@@ -227,6 +245,22 @@ export default function TransferPage() {
                 Picking: <span className="font-mono">{result.pickingName || result.pickingId}</span>
                 {result.status && <span className="ml-2 text-slate-500">(estado: {result.status})</span>}
               </div>
+              {result.shopify ? (
+                result.shopify.created ? (
+                  <div className="mt-2 text-green-700">Draft en Shopify creado (ID: <span className="font-mono">{result.shopify.id}</span>).</div>
+                ) : (
+                  <div className="mt-2">
+                    <a
+                      className="inline-flex items-center rounded-md border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+                      href={`${endpointTransfers().replace(/\/api\/transfers$/, '')}/api/transfers/${result.id}/shopify-draft.csv`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Descargar Draft CSV para Shopify
+                    </a>
+                  </div>
+                )
+              ) : null}
             </div>
           ) : (
             <pre className="rounded bg-slate-900 text-slate-100 p-3 text-xs overflow-auto">{JSON.stringify(result, null, 2)}</pre>

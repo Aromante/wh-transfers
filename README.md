@@ -14,7 +14,9 @@ Interfaz para crear transferencias entre ubicaciones (escáner + edición de can
 - Worker (prod, via secrets):
   - Odoo: `ODOO_URL`, `ODOO_DB`, `ODOO_UID`, `ODOO_API_KEY`, `ODOO_AUTO_VALIDATE=1` (opcional)
   - Supabase: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE`
-  - Shopify: `SHOPIFY_STORE`, `SHOPIFY_ACCESS_TOKEN` (scopes: `read_products`, `read_inventory`; para crear transfers draft opcionalmente `write_inventory` si tu tenant lo soporta)
+  - Shopify: `SHOPIFY_STORE`, `SHOPIFY_ACCESS_TOKEN` (scopes: `read_products`, `read_inventory`, y para drafts: `read_inventory_transfer`/`write_inventory_transfer`).
+
+Nota: En producción, las credenciales de Shopify ya están configuradas para la creación automática de drafts.
 
 ## Dev rápido
 ```bash
@@ -84,4 +86,3 @@ git subtree add --prefix apps/wh-transfers transfers main --squash
 # Actualizar más adelante
 git subtree pull --prefix apps/wh-transfers transfers main --squash
 ```
-

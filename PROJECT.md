@@ -9,13 +9,14 @@
 ## Estado Actual
 - Frontend operativo (Vite + React + Tailwind). Escáner + tabla de líneas + origen/destino.
 - Worker en producción (`transfers-worker`): Odoo JSON‑RPC, validación automática, endpoint de validación Shopify.
-- Supabase: migraciones aplicadas (core + `shopify_location_id`).
+- Supabase: migraciones aplicadas (core + `shopify_location_id`) y mapeo `transfer_locations.shopify_location_id` YA poblado para las ubicaciones operativas (WH/Existencias, KRONI/Existencias, P-CEI/Existencias, P-CON/Existencias).
+- Shopify: credenciales configuradas (STORE + ACCESS_TOKEN); creación automática de drafts habilitada cuando el destino no es `KRONI/Existencias`.
 
 ## Requerimientos Priorizados
 1) Validar inventario en Shopify antes de crear la transferencia
    - Implementado: Worker `POST /api/transfers/validate` con GraphQL Admin.
    - Frontend: valida en submit y bloquea si hay insuficiencia; muestra disponibles por SKU.
-   - Pendientes operativos: poblar `transfer_locations.shopify_location_id` y Shopify creds (STORE + ACCESS_TOKEN).
+   - Operativo: Shopify creds están configuradas; el mapeo `transfer_locations.shopify_location_id` ya está poblado.
 
 2) Editable la cantidad por SKU escaneado (WIP)
    - Pendiente: permitir edición inline de `qty` en la tabla; soportar modo “xN”.
@@ -25,7 +26,7 @@
 - UI: edición de cantidad y validaciones en vivo.
 - Worker: endpoint opcional `validate-product` para mostrar nombre al escanear.
 - Mejorar mensajes de error y toasts.
-- Documentar mapeos Odoo/Shopify por ubicación en README.
+- Mantenimiento: los mapeos Odoo/Shopify por ubicación ya están poblados en Supabase; mantenerlos actualizados si cambian ubicaciones.
 
 ## Variables/Secrets
 - Worker (prod): SUPABASE_URL, SUPABASE_SERVICE_ROLE, ODOO_URL, ODOO_DB, ODOO_UID, ODOO_API_KEY, SHOPIFY_STORE, SHOPIFY_ACCESS_TOKEN, (opcional) ODOO_AUTO_VALIDATE=1.
@@ -34,4 +35,3 @@
 ## Verificación
 - E2E: crear transferencia válida y ver “Done” en Odoo, y reflejo en Shopify via n8n (si aplica).
 - Validación negativa: intentar qty > disponible en Shopify → bloquear con detalle por SKU.
-
