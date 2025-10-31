@@ -4,6 +4,7 @@ Endpoints:
 - POST /api/transfers — Crea transferencia en Odoo (picking + moves) y la registra en Supabase
 - GET  /api/transfers/:id — Estado/detalle
 - GET  /api/transfers/shopify-health — Verifica soporte de mutación de transfer en distintas versiones del Admin API
+ - POST /api/transfers/validate — Valida disponibilidad en Shopify por ubicación de origen (bloqueante)
 
 Secrets/vars (wrangler):
 - SUPABASE_URL
@@ -22,15 +23,17 @@ Secrets/vars (wrangler):
    - `ODOO_KRONI_TRANSIT_LOCATION_ID` (numérico, p. ej. 43) — ubicación de tránsito en Odoo
    - `ODOO_KRONI_TRANSIT_COMPLETE_NAME` (opcional) — `complete_name` de la ubicación de tránsito si se desea resolver por nombre
 
-Estado: En producción, las credenciales de Shopify ya están configuradas; la creación de drafts está habilitada (excepto cuando el destino es `KRONI/Existencias`, donde se omite).
+Estado: En producción, las credenciales de Shopify ya están configuradas; la creación de drafts está habilitada (excepto cuando el destino es `KRONI/Existencias`, donde se omite). La validación previa aplica ahora también para KRONI para evitar parciales en Odoo.
 
 Notas de comportamiento
 - Bodega→tienda (≠ KRONI):
   - Valida disponibilidad en Shopify (batched) → crea draft → crea/valida picking en Odoo.
   - Si el tenant no soporta la mutación, se puede forzar versión/payload con las vars anteriores.
 - Bodega→CEDIS/KRONI:
-  - No valida ni crea draft en Shopify.
+  - Valida disponibilidad en Shopify (bloqueante). No crea draft en Shopify.
   - Crea/valida picking en Odoo con destino forzado a la ubicación de tránsito (ID o `complete_name`).
-  - Actualiza `forecasting_inventory_today` con `location_id=SHOPIFY_KRONI_LOCATION_ID` vía RPC batch (`forecast_set_in_transit_batch`).
+  - Actualiza `forecasting_inventory_today` por fila con `location_id=98632499512` (forzado) — sin RPC.
+
+Logs (Supabase `transfer_logs`): `odoo_created`, `shopify_draft_created`/`shopify_draft_error`, `forecast_target_location`, `forecast_in_transit_applied (via=rest_forced_strict)`.
 
 Desarrollo: `wrangler dev` (si el proyecto se independiza con su propio repo).

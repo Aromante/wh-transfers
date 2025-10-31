@@ -156,3 +156,37 @@ Guía de prueba (actualizada)
   - Verificar draft en Shopify y picking en Odoo.
   - Revisar en Supabase: `shopify_transfer_drafts` y `transfer_logs` (api_version, mutation, input_variant, origin_gid, dest_gid).
 - Caso 3 (Bodega→CEDIS): ejecutar tras corregir lo del destino.
+
+---
+
+Sesión 2025-11-01 — Observaciones de validación y plan de corrección
+
+Resumen
+- Escenario A (WH→CEIBA/CONQUISTA): confirmado OK después de regresión. Mantener estable.
+- Escenario B (WH→KRONI): picking validado en tránsito correcto y sin draft Shopify; pendiente actualización de `forecasting_inventory_today`.
+
+Acciones de documentación
+- README y PROJECT actualizados: aclaración de que la ubicación de tránsito no va en `transfer_locations` y que se implementará fallback a upsert REST si la RPC no existe/falla.
+
+Plan técnico inmediato
+1) Worker (WH→KRONI): forzar escritura por REST hacia `forecasting_inventory_today` usando `SHOPIFY_KRONI_LOCATION_ID` como truth source para `location_id` (bypass de la RPC para evitar mapeos internos). Si el upsert por bloque falla, realizar ciclo por fila con PATCH y, si no afecta filas, POST.
+2) Idempotencia: conservar `transfer_logs.event=forecast_in_transit_applied` para no duplicar.
+3) Acotado a B: sólo se activa en WH→KRONI y cuando `picking.state = done`.
+
+Próximo paso
+- Implementar fallback y desplegar; ejecutar prueba de Escenario B para verificar escritura en Supabase.
+
+---
+
+Sesión 2025-11-01 (Tarde) — Fix final Escenario B
+
+Cambios aplicados
+- Validación previa (Shopify) también para KRONI, bloqueando insuficiencias antes de Odoo. Evita parciales y backorders.
+- Forecasting WH→KRONI: escritura estricta por fila (PATCH/POST) a `forecasting_inventory_today` con `location_id=98632499512` forzado; sin RPC.
+- Auditoría: evento `forecast_target_location` y `forecast_in_transit_applied` con `via: 'rest_forced_strict'`.
+
+Resultado
+- Reprueba del Escenario B correcta: sólo se modifican filas de KRONI y en cuenta con los SKUs enviados. Sin parciales en Odoo.
+
+Notas
+- El Escenario A se mantiene estable: validación y flujo de draft/picking sin cambios.

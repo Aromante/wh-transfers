@@ -7,6 +7,8 @@ Interfaz para crear transferencias entre ubicaciones (escáner + edición de can
 - worker (Cloudflare Worker): `wh-transfers/worker/`
 - supabase (migraciones): `wh-transfers/supabase/migrations/`
 
+Nota importante: no agregues la ubicación de tránsito de Odoo ("Physical Locations/Traslado interno a Kroni") al catálogo `transfer_locations`. Esa ubicación es interna de Odoo, no tiene `shopify_location_id` y el Worker la resuelve por variables (`ODOO_KRONI_TRANSIT_*`).
+
 ## Variables
 - Frontend (`.env.local`):
   - `VITE_API_BASE=https://transfers-worker.<account>.workers.dev/api/transfers`
@@ -18,6 +20,16 @@ Interfaz para crear transferencias entre ubicaciones (escáner + edición de can
 
 Nota: En producción, las credenciales de Shopify ya están configuradas para la creación automática de drafts.
 
+## Estado reciente (2025-10-31)
+- Escenario A (WH → Tiendas: CEIBA/CONQUISTA): validación Shopify operativa, creación de Draft y picking en Odoo siguen funcionales.
+- Escenario B (WH → KRONI): picking validado en Odoo con destino de tránsito "Physical Locations/Traslado interno a Kroni"; no se crea Draft en Shopify (correcto). Pendiente observado: actualización de `forecasting_inventory_today` no aplicada en algunos entornos.
+- Próxima acción: añadir fallback en el Worker para actualizar `forecasting_inventory_today` vía upsert REST cuando la RPC `forecast_set_in_transit_batch` no exista o falle.
+
+## Estado actualizado (2025-11-01)
+- Validación previa (Shopify) ahora aplica también para KRONI: si no hay existencias suficientes en el origen, se bloquea el envío y NO se crea picking parcial en Odoo (mismo comportamiento que Escenario A).
+- Forecasting (WH→KRONI): se fuerza la escritura de `in_transit_units` en `forecasting_inventory_today` por fila (PATCH/POST) con `location_id=98632499512` (Kroni) SIEMPRE, sin usar RPC ni mapeos. Se evita cualquier desvío a otras ubicaciones.
+- Logs: el Worker registra `forecast_target_location` (para auditar el `location_id` aplicado) y `forecast_in_transit_applied` (vía `rest_forced_strict`).
+
 Flujos especiales y ajustes de compatibilidad
 - Forzar versión/payload de Shopify (según tenant):
   - `SHOPIFY_STRICT_VERSION=1` y `SHOPIFY_API_VERSION=unstable` (o la recomendada por `/api/transfers/shopify-health`).
@@ -26,7 +38,29 @@ Flujos especiales y ajustes de compatibilidad
 - KRONI (Bodega→CEDIS):
   - No se crea draft en Shopify.
   - Odoo: destino forzado a la ubicación de tránsito (`ODOO_KRONI_TRANSIT_LOCATION_ID` o `ODOO_KRONI_TRANSIT_COMPLETE_NAME`).
-  - Supabase (reabastecimiento): set directo por `(sku, SHOPIFY_KRONI_LOCATION_ID)` mediante RPC batch (`forecast_set_in_transit_batch`).
+  - Supabase (reabastecimiento): set directo de `in_transit_units` por `(sku, location_id)` en `forecasting_inventory_today` con `location_id=98632499512` (Kroni) forzado. Implementación estricta por fila (PATCH y, si no existe, POST). Se evita RPC y mapeos para este flujo.
+
+## Comportamiento por escenarios
+- Escenario A (WH→Tiendas):
+  - Frontend valida existencias contra Shopify antes de crear; si insuficiente, muestra por SKU (disponible vs solicitado).
+  - Worker valida también; crea draft en Shopify (si el tenant/versión lo permite) y luego crea/valida picking en Odoo.
+  - No afecta forecasting.
+- Escenario B (WH→KRONI):
+  - Frontend valida existencias contra Shopify; si insuficiente, bloquea (no hay parciales en Odoo).
+  - Worker: crea/valida picking en Odoo con destino de tránsito; no crea draft en Shopify; actualiza forecasting con `location_id=98632499512` (forzado) por fila.
+
+## Observabilidad
+- Supabase `transfer_logs`:
+  - `odoo_created`: picking creado (detalle: `pickingId`, `state`).
+  - `shopify_draft_created` o `shopify_draft_error` (Escenario A).
+  - `forecast_target_location` (Escenario B): confirma el `location_id` elegido (98632499512) y motivo.
+  - `forecast_in_transit_applied`: confirma la vía usada (`rest_forced_strict`) y el listado de `updates`.
+
+## Pruebas de sanidad
+- A: WH→Conquista/Ceiba con SKUs suficientes: draft en Shopify (si aplica) y picking Done en Odoo. UI muestra éxito.
+- A (negativo): insuficiencia → UI muestra detalle por SKU, sin crear Odoo.
+- B: WH→KRONI con SKUs suficientes: picking Done en Odoo (tránsito), `forecasting_inventory_today` actualizado sólo para `location_id=98632499512`, 1:1 con SKUs enviados.
+- B (negativo): insuficiencia → UI muestra detalle, sin crear Odoo ni tocar forecasting.
 
 ## Dev rápido
 ```bash
