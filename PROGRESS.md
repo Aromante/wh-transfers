@@ -29,11 +29,20 @@ Resumen de cambios desde la última versión estable subida a GitHub
   - Registra en Supabase `shopify_transfer_drafts` el draft (auto o fallback) y logs `shopify_draft_created` o `shopify_draft_create_failed`.
   - CSV de apoyo: GET `/api/transfers/:id/shopify-draft.csv` (code,qty,origin_shopify_location_id,dest_shopify_location_id).
 
+- Integración con Forecasting — mercancía en tránsito (implementado):
+  - Condición: solo traslados WH/Existencias → KRONI/Existencias con picking validado (estado "done").
+  - Tabla destino: `forecasting_inventory_today` (mismo Supabase).
+  - Claves: `sku` y `location_id` (numérico de Shopify para la ubicación destino).
+  - Escritura: `in_transit_units` SE ESTABLECE (set directo) a la cantidad del transfer por línea; si no existe fila, se inserta.
+  - SKU: se resuelve desde Shopify; fallback al código escaneado (1:1 con SKU).
+  - Idempotencia: evita duplicados mediante log `forecast_in_transit_applied` en `transfer_logs`.
+
 3) Supabase
 - Tablas:
   - `transfers`, `transfer_lines`, `transfer_logs` (auditoría de transferencias)
   - `transfer_locations` (catálogo; se agregó columna `shopify_location_id`)
   - `shopify_transfer_drafts` (registro de draft automáticos/fallback)
+  - Integración consumo: `forecasting_inventory_today` (dashboard de reabastecimiento) actualizado por el Worker para WH→KRONI.
 - Migraciones añadidas:
   - `20251029_init_transfers.sql`
   - `20251029_transfer_locations.sql`
@@ -73,3 +82,77 @@ Resumen de cambios desde la última versión estable subida a GitHub
 - Endpoint `/api/transfers/shopify-health` para verificar soporte de creación de Drafts y reportar scopes.
 - UI: enlace directo a Shopify Admin (si nos comparten el dominio base) y botón “Copiar Picking”.
 - Retries/cola para creación de Drafts en segundo plano.
+
+---
+
+Sesión 2025-10-30 — Iteración integral (Shopify + Odoo + Deploy)
+
+Resumen del día
+- Eliminado “Too many subrequests.” con batching en Shopify (resolución de variantes e inventario) y Odoo (search_read masivo y creación de moves en una sola llamada).
+- Consistencia: draft en Shopify se crea ANTES de Odoo; si falla, se aborta sin tocar Odoo (excepto KRONI).
+- Integración Forecasting (WH→KRONI): Set directo de `in_transit_units` (idempotente).
+- Endpoint nuevo `GET /api/transfers/shopify-health` para probar soporte de mutación en varias versiones del Admin API.
+- Draft Shopify robusto: el Worker intenta múltiples combinaciones (versión + payload) y registra trazas (api_version, mutation, input_variant, origin_gid, dest_gid).
+- Deploy: Worker migrado a service‑worker (addEventListener), sin exports ESM; `wrangler.toml` limpio y scripts a `wrangler deploy`.
+- Frontend: auto‑enfoque del escáner ajustado a 6s + toggle persistente.
+
+Alcance cubierto (AS‑IS → cambios)
+- Validación y creación soportan alto volumen.
+- Draft Shopify obligatorio para tiendas ≠ KRONI (sin CSV por defecto); Odoo solo si el draft existe.
+- Forecasting conectado automáticamente para WH→KRONI.
+- Observabilidad ampliada via `transfer_logs`.
+
+Estado actual
+- Health confirma que versiones estables (2023‑10 → 2025‑01) de este tenant no exponen la mutación `inventoryTransferCreate`.
+- `unstable` permite crear draft (varía por tenant y tiempo); el Worker prueba automáticamente variantes.
+- Caso 1 (Bodega→Conquista): draft creado + picking validado; “destino” en Shopify no quedó correcto (se puede editar manualmente); pendiente fijar variante para que salga bien de primera instancia.
+- Caso 2 (Bodega→Ceiba): listo para re‑probar con Worker actualizado y trazas ampliadas.
+- Caso 3 (Bodega→CEDIS): pendiente tras validar caso 2.
+
+TO‑BE (deseado)
+- 1→1: un draft en Shopify y un picking en Odoo por transferencia (excepto KRONI), sin pasos manuales.
+- Ubicaciones correctas de primera instancia en el draft.
+- Batching robusto para >200 líneas, sin errores por subrequests.
+
+Pendientes para llegar al TO‑BE
+1) Ubicación destino en draft (bug):
+   - Verificar `origin_gid`, `dest_gid`, `input_variant` en `transfer_logs.shopify_draft_created` y `origin_shopify_location_id`/`dest_shopify_location_id` en `shopify_transfer_drafts`.
+   - Fijar explícitamente la variante de payload correcta para este tenant.
+2) Versión de Admin API:
+   - Priorizar `unstable` en `SHOPIFY_API_VERSION`/`SHOPIFY_API_VERSION_LIST` hasta que el tenant exponga la mutación en estable.
+   - Si `unstable` llega a fallar, definir fallback de negocio temporal (CSV bloqueante o ajuste directo de inventario) para no frenar operación.
+3) Retries/backoff en Shopify: añadir reintentos con exponencial (429/5xx) manteniendo UX.
+4) UI: mapear `userErrors` a mensajes legibles.
+5) Seguridad: confirmar que secretos no residan en archivos versionados.
+
+---
+
+Sesión 2025-10-31 — Cierre del día
+
+Resultados
+- Caso 1 (Bodega→Conquista): OK (draft correcto tras forzar versión/payload) y picking validado.
+- Caso 2 (Bodega→Ceiba): OK con versión/payload forzados; destino en Shopify correcto.
+- Caso 3 (Bodega→CEDIS/KRONI): parcial — picking validado pero fue a KRONI/Existencias; forecasting se aplicó sobre ubicación equivocada; “Too many subrequests.” persiste por no omitir validación Shopify en KRONI.
+
+Decisiones
+- Forzar detección de KRONI por IDs y evitar cualquier validación Shopify en ese flujo.
+- Odoo: forzar destino de tránsito mediante `ODOO_KRONI_TRANSIT_LOCATION_ID` (43) o `ODOO_KRONI_TRANSIT_COMPLETE_NAME`.
+- Supabase: usar `SHOPIFY_KRONI_LOCATION_ID` (98632499512) como `location_id` en una sola RPC batch (`forecast_set_in_transit_batch`).
+
+Pendientes inmediatos
+1) Supabase — saneo + índice + función RPC (para KRONI):
+   - Borrar SKUs vacíos: `delete from public.forecasting_inventory_today where btrim(coalesce(sku,''))='' and location_id=98632499512;`
+   - Consolidar duplicados por (sku, location_id) si existen.
+   - Crear índice único parcial: `create unique index if not exists uq_forecasting_inventory_today_sku_loc_nonempty on public.forecasting_inventory_today (sku, location_id) where btrim(coalesce(sku,''))<>'';`
+   - Crear función `forecast_set_in_transit_batch(items)` (contenido en la migración `20251030_forecasting_in_transit_upsert_fn.sql`).
+2) Worker — detección robusta KRONI (con secrets ya confirmados):
+   - Omitir validación Shopify si destino es KRONI; Odoo → tránsito (ID 43); Supabase → RPC con `location_id=98632499512`.
+3) Reprueba Caso 3 (Bodega→KRONI):
+   - Esperado: sin draft; picking a la ubicación tránsito; forecasting set por (sku, 98632499512) sin “Too many subrequests.”.
+
+Guía de prueba (actualizada)
+- GET https://transfers-worker.wispy-unit-fc23.workers.dev/api/transfers/shopify-health y configurar `SHOPIFY_API_VERSION=unstable` y `SHOPIFY_API_VERSION_LIST=unstable,2025-01,2024-10,2024-07,2024-04,2024-01,2023-10`.
+- Caso 2 (Bodega→Ceiba):
+  - Verificar draft en Shopify y picking en Odoo.
+  - Revisar en Supabase: `shopify_transfer_drafts` y `transfer_logs` (api_version, mutation, input_variant, origin_gid, dest_gid).
+- Caso 3 (Bodega→CEDIS): ejecutar tras corregir lo del destino.

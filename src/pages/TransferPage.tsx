@@ -71,19 +71,21 @@ export default function TransferPage() {
     setBusy(true)
     setResult(null)
     try {
-      // Pre-validar inventario en Shopify (si el Worker está configurado)
+      // Pre-validar inventario en Shopify (si aplica). En el flujo WH -> KRONI se omite totalmente
       try {
-        const validateUrl = `${endpointTransfers().replace(/\/api\/transfers$/, '')}/api/transfers/validate`
-        const pre = await fetch(validateUrl, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ origin_id: origin, lines }),
-        })
-        const preData = await pre.json()
-        if (pre.ok && preData?.ok === false && Array.isArray(preData.insufficient) && preData.insufficient.length) {
-          setResult({ ok: false, kind: 'insufficient', insufficient: preData.insufficient, origin })
-          setBusy(false)
-          return
+        if (dest !== 'KRONI/Existencias') {
+          const validateUrl = `${endpointTransfers().replace(/\/api\/transfers$/, '')}/api/transfers/validate`
+          const pre = await fetch(validateUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ origin_id: origin, dest_id: dest, lines }),
+          })
+          const preData = await pre.json()
+          if (pre.ok && preData?.ok === false && Array.isArray(preData.insufficient) && preData.insufficient.length) {
+            setResult({ ok: false, kind: 'insufficient', insufficient: preData.insufficient, origin })
+            setBusy(false)
+            return
+          }
         }
       } catch {}
       const o = origin.trim()

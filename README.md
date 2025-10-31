@@ -18,6 +18,16 @@ Interfaz para crear transferencias entre ubicaciones (escáner + edición de can
 
 Nota: En producción, las credenciales de Shopify ya están configuradas para la creación automática de drafts.
 
+Flujos especiales y ajustes de compatibilidad
+- Forzar versión/payload de Shopify (según tenant):
+  - `SHOPIFY_STRICT_VERSION=1` y `SHOPIFY_API_VERSION=unstable` (o la recomendada por `/api/transfers/shopify-health`).
+  - `SHOPIFY_MUTATION_FIELD=inventoryTransfer` | `transfer`.
+  - `SHOPIFY_INPUT_VARIANT=origin_destination` | `from_to` | `source_destination`.
+- KRONI (Bodega→CEDIS):
+  - No se crea draft en Shopify.
+  - Odoo: destino forzado a la ubicación de tránsito (`ODOO_KRONI_TRANSIT_LOCATION_ID` o `ODOO_KRONI_TRANSIT_COMPLETE_NAME`).
+  - Supabase (reabastecimiento): set directo por `(sku, SHOPIFY_KRONI_LOCATION_ID)` mediante RPC batch (`forecast_set_in_transit_batch`).
+
 ## Dev rápido
 ```bash
 # Frontend

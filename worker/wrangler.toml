@@ -6,6 +6,7 @@ compatibility_date = "2024-10-01"
 ## Non-secret vars. You can also set these per env.
 # SUPABASE_URL = "https://<project>.supabase.co"
 # CORS_ORIGIN = "https://<shell-domain>"
+# SHOPIFY_API_VERSION = "2024-10" # o "unstable" si tu tenant lo requiere
 
 # Secrets needed:
 # - SUPABASE_SERVICE_ROLE (secret)

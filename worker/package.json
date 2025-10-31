@@ -5,11 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy:staging": "wrangler publish --env=staging",
-    "deploy:prod": "wrangler publish --env=production"
+    "deploy:staging": "wrangler deploy --env=staging",
+    "deploy:prod": "wrangler deploy --env=production"
   },
   "devDependencies": {
-    "wrangler": "^3.82.0"
+    "wrangler": "^4.45.3"
   }
 }
-
