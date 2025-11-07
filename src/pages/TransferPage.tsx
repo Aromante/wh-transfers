@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react'
 import ScannerInput from '../components/ScannerInput'
 import useLocations from '../hooks/useLocations'
 import { genId } from '../lib/uuid'
+import { isMultiDraftsEnabled } from '../lib/flags'
+import useDrafts from '../hooks/useDrafts'
+import { getUserId } from '../lib/user'
 
 type Line = { id: string; code: string; qty: number }
 
@@ -19,11 +22,14 @@ function endpointTransfers() {
 
 export default function TransferPage() {
   const { locations, loading } = useLocations()
+  const draftsFlag = isMultiDraftsEnabled()
+  const { drafts, refresh: refreshDrafts } = useDrafts()
   const [origin, setOrigin] = useState<string>('')
   const [dest, setDest] = useState<string>('')
   const [lines, setLines] = useState<Line[]>([])
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<any>(null)
+  const [showDrafts, setShowDrafts] = useState(false)
   const [autoFocus, setAutoFocus] = useState<boolean>(() => {
     try { return localStorage.getItem('wh_auto_focus') !== '0' } catch { return true }
   })
@@ -76,7 +82,7 @@ export default function TransferPage() {
         const validateUrl = `${endpointTransfers().replace(/\/api\/transfers$/, '')}/api/transfers/validate`
         const pre = await fetch(validateUrl, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
           body: JSON.stringify({ origin_id: origin, dest_id: dest, lines }),
         })
         const preData = await pre.json()
@@ -96,7 +102,7 @@ export default function TransferPage() {
       }
       const r = await fetch(endpointTransfers(), {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
         body: JSON.stringify(body),
       })
       const data = await r.json()
@@ -121,6 +127,86 @@ export default function TransferPage() {
     const ok = typeof window !== 'undefined' ? window.confirm(msg) : true
     if (!ok) return
     await submit()
+  }
+
+  const saveAsDraft = async () => {
+    if (!draftsFlag) return
+    if (!origin || !dest || !lines.length) return
+    setBusy(true)
+    try {
+      const body = {
+        origin_id: origin,
+        dest_id: dest,
+        title: null,
+        lines: lines.map(l => ({ barcode: l.code, qty: l.qty }))
+      }
+      const r = await fetch(`${endpointTransfers()}/drafts`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() }, body: JSON.stringify(body) })
+      const data = await r.json()
+      if (!r.ok || data?.ok === false) {
+        alert(`No se pudo guardar el borrador: ${data?.error || r.status}`)
+        return
+      }
+      setLines([])
+      setResult({ ok: true, kind: 'draft_saved', id: data.id })
+      refreshDrafts()
+    } catch (e: any) {
+      alert(`Error guardando borrador: ${String(e?.message || e)}`)
+    } finally { setBusy(false) }
+  }
+
+  const resumeDraft = async (id: string) => {
+    try {
+      const r1 = await fetch(`${endpointTransfers()}/${id}`, { headers: { 'X-User-Id': getUserId() } })
+      const meta = await r1.json().catch(() => null)
+      if (meta && meta.origin_id) setOrigin(meta.origin_id)
+      if (meta && meta.dest_id) setDest(meta.dest_id)
+      const r = await fetch(`${endpointTransfers()}/${id}/lines`, { headers: { 'X-User-Id': getUserId() } })
+      const data = await r.json()
+      if (r.ok && Array.isArray(data?.lines)) {
+        const next: Line[] = data.lines.map((ln: any) => ({ id: genId(), code: String(ln.barcode || ln.sku || ''), qty: Number(ln.qty || 0) })).filter(l => l.code && l.qty > 0)
+        setLines(next)
+        setShowDrafts(false)
+        setResult(null)
+      }
+    } catch {}
+  }
+
+  const validateDraft = async (id: string) => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const r = await fetch(`${endpointTransfers()}/${id}/validate`, { method: 'POST', headers: { 'X-User-Id': getUserId() } })
+      const data = await r.json()
+      if (r.ok && data?.ok) {
+        setResult({ ok: true, kind: 'success', id: data.id, pickingName: data.picking_name, pickingId: data.odoo_picking_id, status: data.status })
+        refreshDrafts()
+      } else {
+        if (Array.isArray(data?.insufficient)) {
+          setResult({ ok: false, kind: 'insufficient', insufficient: data.insufficient, origin })
+        } else {
+          setResult({ ok: false, data })
+        }
+      }
+    } catch (e: any) {
+      setResult({ ok: false, error: String(e?.message || e) })
+    } finally { setBusy(false) }
+  }
+
+  const cancelDraft = async (id: string) => {
+    if (busy) return
+    const ok = typeof window !== 'undefined' ? window.confirm('¿Cancelar este borrador? Esta acción no elimina los datos del historial, pero lo quita de la lista de activos.') : true
+    if (!ok) return
+    setBusy(true)
+    try {
+      const r = await fetch(`${endpointTransfers()}/${id}/cancel`, { method: 'POST', headers: { 'X-User-Id': getUserId() } })
+      const data = await r.json().catch(() => null)
+      if (!r.ok || (data && data.ok === false)) {
+        alert(`No se pudo cancelar: ${data?.error || r.status}`)
+      }
+      await refreshDrafts()
+    } catch (e: any) {
+      alert(`Error al cancelar: ${String(e?.message || e)}`)
+    } finally { setBusy(false) }
   }
 
   return (
@@ -231,6 +317,16 @@ export default function TransferPage() {
         <button disabled={!lines.length || busy || loading || !origin || !dest} onClick={confirmAndSubmit} className="inline-flex items-center rounded-md bg-black text-white px-3 py-2 text-sm disabled:opacity-50">
           {busy ? 'Creando…' : 'Crear transferencia'}
         </button>
+        {draftsFlag && (
+          <>
+            <button disabled={!lines.length || busy || loading || !origin || !dest} onClick={saveAsDraft} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50">
+              Guardar como borrador
+            </button>
+            <button type="button" onClick={() => setShowDrafts(v => !v)} className="ml-auto inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50">
+              {showDrafts ? 'Ocultar borradores' : 'Mis borradores'}
+            </button>
+          </>
+        )}
       </div>
 
       {result && (
@@ -274,6 +370,31 @@ export default function TransferPage() {
           ) : (
             <pre className="rounded bg-slate-900 text-slate-100 p-3 text-xs overflow-auto">{JSON.stringify(result, null, 2)}</pre>
           )}
+        </div>
+      )}
+
+      {draftsFlag && showDrafts && (
+        <div className="mt-6 rounded-lg border border-slate-200 bg-white p-4 text-sm">
+          <div className="flex items-center justify-between">
+            <div className="font-semibold">Mis borradores</div>
+            <button onClick={refreshDrafts} className="text-xs underline">Actualizar</button>
+          </div>
+          <div className="mt-3 divide-y">
+            {drafts.length ? drafts.map((d) => (
+              <div key={d.id} className="py-2 flex items-center gap-3">
+                <div className="flex-1">
+                  <div className="font-medium">{d.draft_title || d.id}</div>
+                  <div className="text-xs text-slate-500">{d.origin_id || '—'} → {d.dest_id || '—'} • {new Date(d.updated_at || d.created_at).toLocaleString()}</div>
+                </div>
+                <button onClick={() => resumeDraft(d.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Reanudar</button>
+                <button onClick={() => validateDraft(d.id)} className="inline-flex items-center rounded-md bg-black text-white px-2 py-1 text-xs">Validar</button>
+                <button onClick={() => cancelDraft(d.id)} className="inline-flex items-center rounded-md border border-red-300 text-red-700 px-2 py-1 text-xs hover:bg-red-50">Cancelar</button>
+              </div>
+            )) : (
+              <div className="py-2 text-slate-500">No tienes borradores.
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

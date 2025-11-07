@@ -17,6 +17,8 @@ interface Env {
   SHOPIFY_MUTATION_FIELD?: string
   SHOPIFY_KRONI_LOCATION_ID?: string
   SHOPIFY_CONQUISTA_LOCATION_ID?: string
+  ENABLE_MULTI_DRAFTS?: string
+  MAX_DRAFTS_PER_OWNER?: string
 }
 
 const ALLOWED_LOCATION_CODES = [
@@ -29,8 +31,8 @@ const ALLOWED_LOCATION_CODES = [
 function corsHeaders(origin?: string) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-User-Id',
   }
 }
 
@@ -224,6 +226,20 @@ function sbHeaders(env: Env) {
   }
 }
 
+// Helpers for small utilities
+function boolFlag(v: any, def: boolean) {
+  const s = String(v ?? '').toLowerCase();
+  if (s === '1' || s === 'true' || s === 'yes' || s === 'on') return true
+  if (s === '0' || s === 'false' || s === 'no' || s === 'off') return false
+  return def
+}
+
+function getOwner(req: Request) {
+  // Simple owner identity via header; adapt when auth is added
+  const h = req.headers.get('X-User-Id') || req.headers.get('x-user-id')
+  return (h && h.trim()) || 'anonymous'
+}
+
 async function sbInsert(env: Env, table: string, rows: any[]) {
   const r = await fetch(`${env.SUPABASE_URL}/rest/v1/${table}`, {
     method: 'POST',
@@ -342,6 +358,39 @@ async function sbGetTransfer(env: Env, id: string) {
   if (!r.ok) throw new Error(await r.text())
   const rows = await r.json()
   return rows?.[0] || null
+}
+
+async function sbGetTransferLines(env: Env, id: string) {
+  const r = await fetch(`${env.SUPABASE_URL}/rest/v1/transfer_lines?transfer_id=eq.${encodeURIComponent(id)}&select=id,barcode,sku,qty,product_id`, { method: 'GET', headers: sbHeaders(env) })
+  if (!r.ok) throw new Error(await r.text())
+  return r.json()
+}
+
+async function sbUpdateTransfer(env: Env, id: string, patch: Record<string, any>) {
+  const r = await fetch(`${env.SUPABASE_URL}/rest/v1/transfers?id=eq.${encodeURIComponent(id)}`, {
+    method: 'PATCH', headers: { ...sbHeaders(env), prefer: 'return=representation' }, body: JSON.stringify(patch)
+  })
+  if (!r.ok) throw new Error(await r.text())
+  const rows = await r.json(); return rows?.[0] || null
+}
+
+async function sbDelete(env: Env, table: string, qp: string) {
+  const r = await fetch(`${env.SUPABASE_URL}/rest/v1/${table}?${qp}`, { method: 'DELETE', headers: sbHeaders(env) })
+  if (!r.ok) throw new Error(await r.text())
+  return true
+}
+
+function parseBoolParam(v: string | null | undefined, def = false) {
+  const s = String(v ?? '').toLowerCase()
+  if (['1','true','yes','on'].includes(s)) return true
+  if (['0','false','no','off'].includes(s)) return false
+  return def
+}
+
+function parseListParam(v: string | null | undefined) {
+  const s = String(v ?? '').trim()
+  if (!s) return [] as string[]
+  return s.split(',').map(x => x.trim()).filter(Boolean)
 }
 
 async function sbInsertShopifyDraft(env: Env, draft: any) {
@@ -595,20 +644,32 @@ async function createTransfer(req: Request, env: Env) {
       }
     } catch {}
 
+    // Build normalized input lines for later persistence
+    const rawLines: { code: string; qty: number }[] = []
+    try {
+      for (const ln of (lines as any[])) {
+        const code = normCode(String(ln.barcode || ln.sku || ''))
+        const qty = Number(ln.qty || 0)
+        if (code && qty > 0) rawLines.push({ code, qty })
+      }
+    } catch {}
+
     // Shopify: validar disponibilidad en origen (bloqueante) — aplica también a KRONI para evitar parciales en Odoo
+    const codeToSku = new Map<string, string>()
     if (env.SHOPIFY_STORE && env.SHOPIFY_ACCESS_TOKEN) {
       try {
         const locGid = await getShopifyLocationGid(env, origin_id)
-        const codes = lines.map((ln: any) => normCode(String(ln.barcode || ln.sku || ''))).filter(Boolean)
+        const codes = rawLines.map((ln: any) => ln.code)
         const variantsMap = await resolveVariantsBatch(env, codes)
         const invItemGids = Array.from(new Set(Array.from(variantsMap.values()).map((v: any) => v?.inventoryItem?.id).filter(Boolean)))
         const availMap = await getAvailableAtLocationBatch(env, invItemGids, locGid)
         const insufficient: any[] = []
-        for (const ln of lines) {
-          const code = normCode(String(ln.barcode || ln.sku || ''))
+        for (const ln of rawLines) {
+          const code = ln.code
           const qty = Number(ln.qty || 0)
           if (!code || qty <= 0) continue
           const variant = variantsMap.get(code)
+          try { const sku = (variant?.sku && String(variant.sku).trim()) || '' ; if (sku) codeToSku.set(code, sku) } catch {}
           if (!variant) { insufficient.push({ code, requested: qty, available: 0, reason: 'no_variant' }); continue }
           const avail = Number(availMap.get(variant.inventoryItem.id) ?? 0)
           if (avail < qty) insufficient.push({ code, requested: qty, available: avail })
@@ -630,16 +691,17 @@ async function createTransfer(req: Request, env: Env) {
       try {
         originLocGid = await getShopifyLocationGid(env, origin_id)
         destLocGid = await getShopifyLocationGid(env, dest_id)
-        const codesForDraft = lines.map((ln: any) => normCode(String(ln.barcode || ln.sku || ''))).filter(Boolean)
+        const codesForDraft = rawLines.map(l => l.code)
         const variantsMapForDraft = await resolveVariantsBatch(env, codesForDraft)
         const createLines: { inventoryItemId: string, quantity: number }[] = []
         draftLinesCache = []
-        for (const ln of lines) {
-          const code = normCode(String(ln.barcode || ln.sku || ''))
+        for (const ln of rawLines) {
+          const code = ln.code
           const qty = Number(ln.qty || 0)
           if (!code || qty <= 0) continue
           const variant = variantsMapForDraft.get(code)
           const invItemId = variant?.inventoryItem?.id || null
+          try { const sku = (variant?.sku && String(variant.sku).trim()) || '' ; if (sku) codeToSku.set(code, sku) } catch {}
           draftLinesCache.push({ code, qty, variantId: variant?.id || null, inventoryItemId: invItemId })
           if (invItemId) createLines.push({ inventoryItemId: invItemId, quantity: qty })
         }
@@ -729,13 +791,17 @@ async function createTransfer(req: Request, env: Env) {
       odoo_picking_id: String(pickingId),
       picking_name: pickingName,
     }])
-    await sbInsert(env, 'transfer_lines', resolved.map((mv) => ({
-      transfer_id: transferId,
-      product_id: String(mv.product_id),
-      barcode: null,
-      sku: null,
-      qty: mv.qty,
-    })))
+    // Persist input codes for later audit/history (barcode as entered; sku when resolvable)
+    try {
+      const toPersist = rawLines.map(ln => ({
+        transfer_id: transferId,
+        product_id: null,
+        barcode: ln.code,
+        sku: codeToSku.get(ln.code) || null,
+        qty: ln.qty,
+      }))
+      await sbInsert(env, 'transfer_lines', toPersist)
+    } catch {}
     await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'odoo_created', detail: { pickingId, pickingName, state: pickingState } }])
     if (origin_id === 'WH/Existencias' && kroniTransit) {
       // Registrar explícitamente que se activó el flag de auto-sync en el picking
@@ -834,6 +900,389 @@ async function getTransfer(_req: Request, env: Env, id: string) {
   }
 }
 
+// -------- Drafts API (behind flag) --------
+async function draftsList(req: Request, env: Env) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const owner = getOwner(req)
+    const usp = new URL(req.url)
+    const limit = Math.max(1, Math.min(3, Number(usp.searchParams.get('limit') || '3')))
+    const q = new URLSearchParams()
+    q.set('status', 'eq.draft')
+    q.set('draft_owner', `eq.${owner}`)
+    q.set('select', 'id,client_transfer_id,origin_id,dest_id,status,draft_title,updated_at,created_at')
+    q.set('order', 'updated_at.desc')
+    q.set('limit', String(limit))
+    const r = await fetch(`${env.SUPABASE_URL}/rest/v1/transfers?${q.toString()}`, { headers: sbHeaders(env) })
+    if (!r.ok) throw new Error(await r.text())
+    const rows = await r.json()
+    return json({ ok: true, drafts: rows }, { headers: cors })
+  } catch (e: any) { return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors }) }
+}
+
+async function draftsCreate(req: Request, env: Env) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const owner = getOwner(req)
+    const maxDrafts = Number(env.MAX_DRAFTS_PER_OWNER || '3') || 3
+    // Count current drafts
+    const rCount = await fetch(`${env.SUPABASE_URL}/rest/v1/transfers?select=id&status=eq.draft&draft_owner=eq.${encodeURIComponent(owner)}`, { headers: sbHeaders(env) })
+    if (!rCount.ok) throw new Error(await rCount.text())
+    const rows = await rCount.json()
+    if (Array.isArray(rows) && rows.length >= maxDrafts) return json({ ok: false, error: `Límite de borradores alcanzado (${maxDrafts})` }, { status: 409, headers: cors })
+
+    const body = await req.json().catch(() => ({}))
+    const { origin_id, dest_id, title, lines } = body || {}
+    const clientId = crypto.randomUUID()
+    const toInsert: any = {
+      id: crypto.randomUUID(),
+      client_transfer_id: clientId,
+      origin_id: String(origin_id || ''),
+      dest_id: String(dest_id || ''),
+      status: 'draft',
+      draft_owner: owner,
+      draft_title: title ? String(title) : null,
+    }
+    const inserted = await sbInsert(env, 'transfers', [toInsert])
+    const transferId = inserted?.[0]?.id || toInsert.id
+    // Optional initial lines
+    if (Array.isArray(lines) && lines.length) {
+      const toLines = lines.map((ln: any) => ({ transfer_id: transferId, barcode: String(ln.barcode || ln.sku || ln.code || ''), sku: ln.sku ? String(ln.sku) : null, qty: Number(ln.qty || 0) })).filter((x: any) => x.barcode && x.qty > 0)
+      if (toLines.length) await sbInsert(env, 'transfer_lines', toLines)
+    }
+    await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'draft_created', detail: { owner, title: toInsert.draft_title || null } }])
+    return json({ ok: true, id: transferId, client_transfer_id: clientId, status: 'draft' }, { headers: cors })
+  } catch (e: any) { return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors }) }
+}
+
+async function draftUpdateMeta(req: Request, env: Env, id: string) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const tr = await sbGetTransfer(env, id)
+    if (!tr) return json({ ok: false, error: 'not_found' }, { status: 404, headers: cors })
+    if (tr.status !== 'draft') return json({ ok: false, error: 'not_draft' }, { status: 409, headers: cors })
+    const body = await req.json().catch(() => ({}))
+    const patch: any = {}
+    if ('title' in body) patch.draft_title = body.title
+    if ('origin_id' in body) patch.origin_id = body.origin_id
+    if ('dest_id' in body) patch.dest_id = body.dest_id
+    const saved = await sbUpdateTransfer(env, id, patch)
+    await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'draft_updated', detail: patch }])
+    return json({ ok: true, transfer: saved }, { headers: cors })
+  } catch (e: any) { return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors }) }
+}
+
+async function draftGetLines(_req: Request, env: Env, id: string) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const tr = await sbGetTransfer(env, id)
+    if (!tr) return json({ ok: false, error: 'not_found' }, { status: 404, headers: cors })
+    const rows = await sbGetTransferLines(env, id)
+    return json({ ok: true, lines: rows }, { headers: cors })
+  } catch (e: any) { return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors }) }
+}
+
+async function draftUpsertLines(req: Request, env: Env, id: string) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const tr = await sbGetTransfer(env, id)
+    if (!tr) return json({ ok: false, error: 'not_found' }, { status: 404, headers: cors })
+    if (tr.status !== 'draft') return json({ ok: false, error: 'not_draft' }, { status: 409, headers: cors })
+    const body = await req.json().catch(() => ({}))
+    const arr = Array.isArray(body) ? body : (Array.isArray(body?.lines) ? body.lines : [])
+    const items = arr.map((ln: any) => ({ code: String(ln.code || ln.barcode || ln.sku || ''), qty: Number(ln.qty || 0), sku: ln.sku ? String(ln.sku) : null })).filter(it => it.code && it.qty > 0)
+    if (!items.length) return json({ ok: false, error: 'no_lines' }, { status: 400, headers: cors })
+    // Fetch current lines to decide upsert
+    const current: any[] = await sbGetTransferLines(env, id)
+    const byCode = new Map<string, any>(); for (const r of current) { const key = (r.barcode || r.sku || '').trim(); if (key) byCode.set(key, r) }
+    const results: any[] = []
+    for (const it of items) {
+      const existing = byCode.get(it.code)
+      if (existing) {
+        const q = new URLSearchParams(); q.set('id', `eq.${existing.id}`)
+        const r = await fetch(`${env.SUPABASE_URL}/rest/v1/transfer_lines?${q.toString()}`, { method: 'PATCH', headers: { ...sbHeaders(env), prefer: 'return=representation' }, body: JSON.stringify({ qty: it.qty, sku: it.sku || null, barcode: existing.barcode || it.code }) })
+        if (!r.ok) throw new Error(await r.text()); results.push(await r.json())
+      } else {
+        const r = await sbInsert(env, 'transfer_lines', [{ transfer_id: id, barcode: it.code, sku: it.sku || null, qty: it.qty }])
+        results.push(r)
+      }
+    }
+    await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'draft_lines_upserted', detail: { count: items.length } }])
+    return json({ ok: true, updated: results.length }, { headers: cors })
+  } catch (e: any) { return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors }) }
+}
+
+async function draftDeleteLine(_req: Request, env: Env, id: string, code: string) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const tr = await sbGetTransfer(env, id)
+    if (!tr) return json({ ok: false, error: 'not_found' }, { status: 404, headers: cors })
+    if (tr.status !== 'draft') return json({ ok: false, error: 'not_draft' }, { status: 409, headers: cors })
+    const q = new URLSearchParams(); q.set('transfer_id', `eq.${id}`); q.set('barcode', `eq.${code}`)
+    await sbDelete(env, 'transfer_lines', q.toString())
+    await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'draft_line_deleted', detail: { code } }])
+    return json({ ok: true }, { headers: cors })
+  } catch (e: any) { return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors }) }
+}
+
+async function draftCancel(_req: Request, env: Env, id: string) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const tr = await sbGetTransfer(env, id)
+    if (!tr) return json({ ok: false, error: 'not_found' }, { status: 404, headers: cors })
+    if (tr.status !== 'draft' && tr.status !== 'ready') return json({ ok: false, error: 'cannot_cancel' }, { status: 409, headers: cors })
+    const saved = await sbUpdateTransfer(env, id, { status: 'cancelled' })
+    await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'draft_cancelled', detail: {} }])
+    return json({ ok: true, transfer: saved }, { headers: cors })
+  } catch (e: any) { return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors }) }
+}
+
+async function draftValidate(_req: Request, env: Env, id: string) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const tr = await sbGetTransfer(env, id)
+    if (!tr) return json({ ok: false, error: 'not_found' }, { status: 404, headers: cors })
+    if (tr.status !== 'draft' && tr.status !== 'ready') return json({ ok: false, error: 'not_valid_state' }, { status: 409, headers: cors })
+    const origin_id = tr.origin_id
+    const dest_id = tr.dest_id
+    const lines = await sbGetTransferLines(env, id)
+    if (!Array.isArray(lines) || lines.length === 0) return json({ ok: false, error: 'empty_lines' }, { status: 400, headers: cors })
+
+    // Build payload like createTransfer but without inserting new transfer; update existing instead
+    // Shopify validation: same logic as createTransfer (block on insufficient)
+    const codeToSku = new Map<string, string>()
+    if (env.SHOPIFY_STORE && env.SHOPIFY_ACCESS_TOKEN) {
+      try {
+        const locGid = await getShopifyLocationGid(env, origin_id)
+        const codes = lines.map((ln: any) => normCode(String(ln.barcode || ln.sku || ''))).filter(Boolean)
+        const variantsMap = await resolveVariantsBatch(env, codes)
+        const invItemGids = Array.from(new Set(Array.from(variantsMap.values()).map((v: any) => v?.inventoryItem?.id).filter(Boolean)))
+        const availMap = await getAvailableAtLocationBatch(env, invItemGids, locGid)
+        const insufficient: any[] = []
+        for (const ln of lines) {
+          const code = normCode(String(ln.barcode || ln.sku || ''))
+          const qty = Number(ln.qty || 0)
+          if (!code || qty <= 0) continue
+          const variant = variantsMap.get(code)
+          try { const sku = (variant?.sku && String(variant.sku).trim()) || '' ; if (sku) codeToSku.set(code, sku) } catch {}
+          if (!variant) { insufficient.push({ code, requested: qty, available: 0, reason: 'no_variant' }); continue }
+          const avail = Number(availMap.get(variant.inventoryItem.id) ?? 0)
+          if (avail < qty) insufficient.push({ code, requested: qty, available: avail })
+        }
+        if (insufficient.length) return json({ ok: false, insufficient }, { status: 409, headers: cors })
+      } catch (e: any) {
+        return json({ ok: false, error: `Shopify validation failed: ${String(e?.message || e)}` }, { status: 502, headers: cors })
+      }
+    }
+
+    // Enrich stored lines with barcode and sku for auditability
+    try {
+      for (const ln of lines) {
+        const code = normCode(String(ln.barcode || ln.sku || ''))
+        if (!code) continue
+        const resolvedSku = codeToSku.get(code) || null
+        const q = new URLSearchParams(); q.set('id', `eq.${ln.id}`)
+        await fetch(`${env.SUPABASE_URL}/rest/v1/transfer_lines?${q.toString()}`, {
+          method: 'PATCH', headers: { ...sbHeaders(env), prefer: 'return=minimal' },
+          body: JSON.stringify({ barcode: code, sku: resolvedSku })
+        })
+      }
+    } catch {}
+
+    // Odoo picking creation (same as createTransfer with resolved products)
+    const pickingTypeId = await findInternalPickingType(env)
+    const srcId = await findLocationIdByCompleteName(env, origin_id)
+    let dstId = 0
+    let kroniTransit = false
+    if (dest_id === 'KRONI/Existencias') {
+      const transitId = Number((env as any).ODOO_KRONI_TRANSIT_LOCATION_ID || 0)
+      if (transitId > 0) dstId = transitId
+      else {
+        const transitName = String((env as any).ODOO_KRONI_TRANSIT_COMPLETE_NAME || 'Physical Locations/Traslado interno a Kroni').trim()
+        dstId = await findLocationIdByCompleteName(env, transitName)
+      }
+      kroniTransit = true
+    } else {
+      dstId = await findLocationIdByCompleteName(env, dest_id)
+    }
+    const codesAll = lines.map((ln: any) => String(ln.barcode || ln.sku || '').trim()).filter(Boolean)
+    const productsMap = await findProductsByCodes(env, codesAll)
+    const resolved = [] as { product_id: number; name: string; uom_id: number; qty: number }[]
+    for (const ln of lines) {
+      const code = String(ln.barcode || ln.sku || '').trim(); const qty = Number(ln.qty || 0)
+      if (!code || qty <= 0) continue
+      const prod = productsMap.get(code)
+      if (!prod) throw new Error(`Producto no encontrado: ${code}`)
+      resolved.push({ product_id: prod.id, name: prod.name, uom_id: prod.uom_id, qty })
+    }
+    if (!resolved.length) return json({ ok: false, error: 'no_valid_lines' }, { status: 400, headers: cors })
+    const moveCmds = resolved.map(mv => [0, 0, { name: mv.name, product_id: mv.product_id, product_uom: mv.uom_id, product_uom_qty: mv.qty, location_id: srcId, location_dest_id: dstId }])
+    const pickingVals: Record<string, any> = { picking_type_id: pickingTypeId, location_id: srcId, location_dest_id: dstId, origin: tr.client_transfer_id, move_ids_without_package: moveCmds }
+    if (origin_id === 'WH/Existencias' && kroniTransit) pickingVals['x_krn_auto_sync_enabled'] = true
+    const pickingId: number = await odooExecuteKw(env, 'stock.picking', 'create', [pickingVals])
+    await odooExecuteKw(env, 'stock.picking', 'action_confirm', [[pickingId]])
+    try { await odooExecuteKw(env, 'stock.picking', 'action_assign', [[pickingId]]) } catch {}
+    const autoValidate = String(env.ODOO_AUTO_VALIDATE || '1')
+    if (autoValidate === '1' || autoValidate.toLowerCase() === 'true') { try { await validatePicking(env, pickingId) } catch {} }
+    const pickRow = await odooRead(env, 'stock.picking', [pickingId], ['name','state'])
+    const pickingName = pickRow?.[0]?.name || String(pickingId)
+    const pickingState = pickRow?.[0]?.state || 'unknown'
+    await sbUpdateTransfer(env, id, { status: pickingState === 'done' ? 'validated' : 'odoo_created', odoo_picking_id: String(pickingId), picking_name: pickingName })
+    await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'odoo_created', detail: { pickingId, pickingName, state: pickingState } }])
+    // KRONI forecasting strict update (same logic as createTransfer)
+    try {
+      if (pickingState === 'done' && origin_id === 'WH/Existencias' && dest_id === 'KRONI/Existencias') {
+        const rLog = await fetch(`${env.SUPABASE_URL}/rest/v1/transfer_logs?transfer_id=eq.${encodeURIComponent(id)}&event=eq.forecast_in_transit_applied&select=id`, { method: 'GET', headers: sbHeaders(env) })
+        if (rLog.ok) {
+          const existed = await rLog.json()
+          if (!Array.isArray(existed) || existed.length === 0) {
+            const destLocNumeric = 98632499512
+            await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'forecast_target_location', detail: { chosen_location_id: destLocNumeric, reason: 'hardcoded_for_KRONI' } }])
+            const items = lines.map((ln: any) => ({ sku: (String(ln.sku || ln.barcode || '') || '').trim() || String(ln.barcode || ''), location_id: destLocNumeric, in_transit_units: Number(ln.qty || 0) }))
+            const up = await sbUpsertForecastingTodayStrict(env, items)
+            await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'forecast_in_transit_applied', detail: { via: 'rest_forced_strict', updates: items, result_count: Array.isArray(up) ? up.length : null } }])
+          }
+        }
+      }
+    } catch (e) {
+      await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'forecast_in_transit_error', detail: { error: String((e as any)?.message || e) } }])
+    }
+    return json({ ok: true, id, picking_name: pickingName, odoo_picking_id: String(pickingId), status: pickingState === 'done' ? 'validated' : 'odoo_created' }, { headers: cors })
+  } catch (e: any) { return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors }) }
+}
+
+// -------- History API (behind flag) --------
+async function historyList(req: Request, env: Env) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const url = new URL(req.url)
+    const qpIn = url.searchParams
+    const page = Math.max(1, Number(qpIn.get('page') || '1'))
+    const pageSize = Math.max(1, Math.min(200, Number(qpIn.get('pageSize') || '50')))
+    const statusList = parseListParam(qpIn.get('status'))
+    const ownerParam = String(qpIn.get('owner') || '').trim()
+    const originId = String(qpIn.get('origin') || '').trim()
+    const destId = String(qpIn.get('dest') || '').trim()
+    const from = String(qpIn.get('from') || '').trim()
+    const to = String(qpIn.get('to') || '').trim()
+    const search = String(qpIn.get('search') || '').trim()
+    const formatCsv = String(qpIn.get('format') || '').toLowerCase() === 'csv'
+
+    const qs = new URLSearchParams()
+    qs.set('select', 'id,client_transfer_id,origin_id,dest_id,status,draft_owner,draft_title,created_at,updated_at,picking_name')
+    qs.set('order', 'created_at.desc')
+    qs.set('limit', String(pageSize))
+    qs.set('offset', String((page - 1) * pageSize))
+
+    if (statusList.length) {
+      // Supabase REST: status=in.("a","b")
+      const inList = '(' + statusList.map(s => `"${s}"`).join(',') + ')'
+      qs.set('status', `in.${inList}`)
+    }
+    if (ownerParam) qs.set('draft_owner', `eq.${ownerParam}`)
+    if (originId) qs.set('origin_id', `eq.${originId}`)
+    if (destId) qs.set('dest_id', `eq.${destId}`)
+    if (from || to) {
+      const ands: string[] = []
+      if (from) ands.push(`created_at.gte.${from}`)
+      if (to) ands.push(`created_at.lt.${to}`)
+      qs.set('and', `(${ands.join(',')})`)
+    }
+
+    // Optional search on lines (sku/barcode)
+    if (search) {
+      const ls = new URLSearchParams()
+      ls.set('select', 'transfer_id')
+      ls.set('or', `sku.ilike.*${search}*,barcode.ilike.*${search}*`)
+      ls.set('limit', '10000')
+      const rLines = await fetch(`${env.SUPABASE_URL}/rest/v1/transfer_lines?${ls.toString()}`, { headers: sbHeaders(env) })
+      if (!rLines.ok) throw new Error(await rLines.text())
+      const rows = await rLines.json()
+      const ids = Array.from(new Set((rows || []).map((x: any) => x.transfer_id).filter(Boolean)))
+      if (!ids.length) return json({ ok: true, rows: [], total: 0, page, pageSize }, { headers: cors })
+      const idList = '(' + ids.map((id: string) => `"${id}"`).join(',') + ')'
+      qs.set('id', `in.${idList}`)
+    }
+
+    const r = await fetch(`${env.SUPABASE_URL}/rest/v1/transfers?${qs.toString()}`, { headers: { ...sbHeaders(env), Prefer: 'count=exact' } })
+    if (!r.ok) throw new Error(await r.text())
+    const rows = await r.json()
+    const contentRange = r.headers.get('content-range') || ''
+    // format: items start-end/total
+    let total = null as any
+    const m = contentRange.match(/\/(\d+)$/)
+    if (m) total = Number(m[1])
+
+    if (formatCsv) {
+      const cols = ['id','client_transfer_id','origin_id','dest_id','status','draft_owner','draft_title','picking_name','created_at']
+      const esc = (v: any) => {
+        const s = v == null ? '' : String(v)
+        return (s.includes(',') || s.includes('"') || s.includes('\n')) ? '"' + s.replace(/"/g, '""') + '"' : s
+      }
+      const lines = [cols.join(',')].concat(rows.map((r: any) => cols.map(k => esc(r?.[k])).join(',')))
+      const csv = lines.join('\n')
+      return new Response(csv, { status: 200, headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="transfers-history-${Date.now()}.csv"`, ...cors } })
+    }
+    return json({ ok: true, rows, total, page, pageSize }, { headers: cors })
+  } catch (e: any) {
+    return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: corsHeaders(env.CORS_ORIGIN) })
+  }
+}
+
+async function duplicateTransfer(req: Request, env: Env, id: string) {
+  const cors = corsHeaders(env.CORS_ORIGIN)
+  const enabled = boolFlag(env.ENABLE_MULTI_DRAFTS, false)
+  if (!enabled) return new Response('Not found', { status: 404 })
+  try {
+    const tr = await sbGetTransfer(env, id)
+    if (!tr) return json({ ok: false, error: 'not_found' }, { status: 404, headers: cors })
+    const owner = getOwner(req)
+    const maxDrafts = Number(env.MAX_DRAFTS_PER_OWNER || '3') || 3
+    // Enforce drafts limit per owner
+    const rCount = await fetch(`${env.SUPABASE_URL}/rest/v1/transfers?select=id&status=eq.draft&draft_owner=eq.${encodeURIComponent(owner)}`, { headers: sbHeaders(env) })
+    if (!rCount.ok) throw new Error(await rCount.text())
+    const rows = await rCount.json()
+    if (Array.isArray(rows) && rows.length >= maxDrafts) return json({ ok: false, error: `Límite de borradores alcanzado (${maxDrafts})` }, { status: 409, headers: cors })
+
+    const lines = await sbGetTransferLines(env, id)
+    const newId = crypto.randomUUID()
+    const toInsert: any = {
+      id: newId,
+      client_transfer_id: crypto.randomUUID(),
+      origin_id: tr.origin_id,
+      dest_id: tr.dest_id,
+      status: 'draft',
+      draft_owner: owner,
+      draft_title: tr.draft_title ? `Copia de ${tr.draft_title}` : `Copia ${tr.id.slice(0,8)}`,
+    }
+    await sbInsert(env, 'transfers', [toInsert])
+    const toLines = (lines || []).map((ln: any) => ({ transfer_id: newId, barcode: ln.barcode || ln.sku || null, sku: ln.sku || null, qty: Number(ln.qty || 0) })).filter((x: any) => (x.barcode || x.sku) && x.qty > 0)
+    if (toLines.length) await sbInsert(env, 'transfer_lines', toLines)
+    await sbInsert(env, 'transfer_logs', [{ transfer_id: newId, event: 'draft_created', detail: { owner, from_transfer_id: id, duplicated: true } }])
+    return json({ ok: true, id: newId, status: 'draft' }, { headers: cors })
+  } catch (e: any) {
+    return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors })
+  }
+}
+
 async function fetchHandler(req: Request, env: Env) {
     const url = new URL(req.url)
     const { pathname } = url
@@ -908,6 +1357,39 @@ async function fetchHandler(req: Request, env: Env) {
       return createTransfer(req, env)
     }
 
+    // Drafts endpoints (only if enabled)
+    if (req.method === 'GET' && pathname === '/api/transfers/drafts') {
+      return draftsList(req, env)
+    }
+    if (req.method === 'POST' && pathname === '/api/transfers/drafts') {
+      return draftsCreate(req, env)
+    }
+    if (req.method === 'PATCH' && pathname.match(/^\/api\/transfers\/[^/]+$/)) {
+      const id = pathname.split('/').pop() || ''
+      return draftUpdateMeta(req, env, id)
+    }
+    if (req.method === 'GET' && pathname.match(/^\/api\/transfers\/[^/]+\/lines$/)) {
+      const id = pathname.split('/')[3]
+      return draftGetLines(req, env, id)
+    }
+    if (req.method === 'POST' && pathname.match(/^\/api\/transfers\/[^/]+\/lines$/)) {
+      const id = pathname.split('/')[3]
+      return draftUpsertLines(req, env, id)
+    }
+    if (req.method === 'DELETE' && pathname.match(/^\/api\/transfers\/[^/]+\/lines\//)) {
+      const parts = pathname.split('/')
+      const id = parts[3]; const code = decodeURIComponent(parts[5] || '')
+      return draftDeleteLine(req, env, id, code)
+    }
+    if (req.method === 'POST' && pathname.match(/^\/api\/transfers\/[^/]+\/cancel$/)) {
+      const id = pathname.split('/')[3]
+      return draftCancel(req, env, id)
+    }
+    if (req.method === 'POST' && pathname.match(/^\/api\/transfers\/[^/]+\/validate$/)) {
+      const id = pathname.split('/')[3]
+      return draftValidate(req, env, id)
+    }
+
     if (req.method === 'GET' && pathname.match(/^\/api\/transfers\/([^/]+)\/shopify-draft\.csv$/)) {
       const id = pathname.split('/')[3]
       try {
@@ -928,9 +1410,20 @@ async function fetchHandler(req: Request, env: Env) {
       }
     }
 
+    // History endpoint must be checked before generic /:id matcher
+    if (req.method === 'GET' && pathname === '/api/transfers/history') {
+      return historyList(req, env)
+    }
+
     if (req.method === 'GET' && pathname.startsWith('/api/transfers/')) {
       const id = pathname.split('/').pop() || ''
       return getTransfer(req, env, id)
+    }
+    
+    // History and duplicate endpoints
+    if (req.method === 'POST' && pathname.match(/^\/api\/transfers\/[^/]+\/duplicate$/)) {
+      const id = pathname.split('/')[3]
+      return duplicateTransfer(req, env, id)
     }
 
     return new Response('Not found', { status: 404 })
@@ -953,6 +1446,8 @@ function getEnv(): Env {
     SHOPIFY_API_VERSION: g.SHOPIFY_API_VERSION,
     SHOPIFY_API_VERSION_LIST: g.SHOPIFY_API_VERSION_LIST,
     SHOPIFY_CONQUISTA_LOCATION_ID: g.SHOPIFY_CONQUISTA_LOCATION_ID,
+    ENABLE_MULTI_DRAFTS: g.ENABLE_MULTI_DRAFTS,
+    MAX_DRAFTS_PER_OWNER: g.MAX_DRAFTS_PER_OWNER,
   }
 }
 

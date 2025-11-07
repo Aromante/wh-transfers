@@ -13,12 +13,26 @@ Nota importante: no agregues la ubicación de tránsito de Odoo ("Physical Locat
 - Frontend (`.env.local`):
   - `VITE_API_BASE=https://transfers-worker.<account>.workers.dev/api/transfers`
   - `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`
+  - (Opcional) `VITE_ENABLE_MULTI_DRAFTS=1` para habilitar UI de borradores simultáneos (máx 3)
 - Worker (prod, via secrets):
   - Odoo: `ODOO_URL`, `ODOO_DB`, `ODOO_UID`, `ODOO_API_KEY`, `ODOO_AUTO_VALIDATE=1` (opcional)
   - Supabase: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE`
   - Shopify: `SHOPIFY_STORE`, `SHOPIFY_ACCESS_TOKEN` (scopes: `read_products`, `read_inventory`, y para drafts: `read_inventory_transfer`/`write_inventory_transfer`).
 
 Nota: En producción, las credenciales de Shopify ya están configuradas para la creación automática de drafts.
+
+## Funciones Clave (2025‑11‑07)
+- Borradores simultáneos (máx 3 por owner):
+  - UI: botón “Guardar como borrador” y panel “Mis borradores” (Reanudar, Validar, Cancelar).
+  - Flags: `VITE_ENABLE_MULTI_DRAFTS=1` (frontend) y `ENABLE_MULTI_DRAFTS=1`, `MAX_DRAFTS_PER_OWNER=3` (Worker).
+  - Compatibilidad: el endpoint `POST /api/transfers` sigue funcionando para crear directo.
+- Historial con filtros y CSV:
+  - Vista “Historial”: filtros por Estado/Origen/Destino (dropdowns) + fechas (calendario) + búsqueda por SKU/Código.
+  - Expandible por transfer: muestra líneas (SKU/código y cantidad) desde `transfer_lines`.
+  - Acción “Duplicar como borrador” por fila.
+- Persistencia de detalle en líneas:
+  - Para nuevas transferencias se guarda `barcode` y, si es resoluble, `sku` en `transfer_lines`.
+  - Históricos previos pueden no tener este detalle (aparecerán como “—”).
 
 ## Estado reciente (2025-10-31)
 - Escenario A (WH → Tiendas: CEIBA/CONQUISTA): validación Shopify operativa, creación de Draft y picking en Odoo siguen funcionales.
@@ -95,6 +109,11 @@ npm run deploy:prod
 - `20251029_init_transfers.sql`: `transfers`, `transfer_lines`, `transfer_logs`
 - `20251029_transfer_locations.sql`: catálogo de ubicaciones (`code`, `name`, `is_default_origin`)
 - `20251029_add_shopify_location_id.sql`: columna `shopify_location_id` en `transfer_locations`
+- `20251107_add_draft_columns.sql`: columnas de borradores (`draft_owner`, `draft_title`, `updated_at`, `draft_locked`) + índice y trigger
+- `20251107_history_indexes.sql`: índices para acelerar consultas de historial (por fecha/estado/destino)
+  
+Mantenimiento (retención)
+- Script sugerido: `supabase/maintenance/retention.sql` para purgar `cancelled` > 180 días y `validated` > 365 días (ajustable) y sus logs.
 
 ## Crear repo en GitHub (standalone)
 1) Crea un repo vacío en GitHub (por ejemplo `wh-transfers`).
@@ -130,3 +149,15 @@ git subtree add --prefix apps/wh-transfers transfers main --squash
 # Actualizar más adelante
 git subtree pull --prefix apps/wh-transfers transfers main --squash
 ```
+## Estado adicional (2025-11-07) — Borradores simultáneos
+- Se agregan borradores simultáneos (máximo 3 por owner) para capturar y pausar múltiples transfers (p. ej. KRONI semanal + tiendas entre semana).
+- Activación controlada por flags:
+  - Frontend: `VITE_ENABLE_MULTI_DRAFTS=1` (oculto por defecto; no afecta flujo actual de creación directa).
+  - Worker: `ENABLE_MULTI_DRAFTS=1`, `MAX_DRAFTS_PER_OWNER=3`.
+- Tablas: `transfers` ahora incluye `draft_owner`, `draft_title`, `updated_at`, `draft_locked` (migración `20251107_add_draft_columns.sql`).
+- Rutas nuevas en Worker (cuando habilitado): `GET/POST /api/transfers/drafts`, `GET/POST/DELETE /api/transfers/:id/lines`, `PATCH /api/transfers/:id`, `POST /api/transfers/:id/cancel`, `POST /api/transfers/:id/validate`.
+- Compatibilidad: el endpoint actual `POST /api/transfers` sigue intacto; KRONI mantiene comportamiento especial.
+
+## API — Historial y utilidades
+- `GET /api/transfers/history` → filtros: `status`, `owner`, `origin`, `dest`, `from`, `to`, `search`, `page`, `pageSize`; `format=csv` para exportar.
+- `POST /api/transfers/:id/duplicate` → crea un borrador nuevo copiando meta y líneas del transfer origen.

@@ -18,6 +18,9 @@ Secrets/vars (wrangler):
    - `SHOPIFY_STRICT_VERSION` (1/true para usar sólo `SHOPIFY_API_VERSION` sin probar otras)
    - `SHOPIFY_INPUT_VARIANT` (`origin_destination` | `from_to` | `source_destination`)
    - `SHOPIFY_MUTATION_FIELD` (`transfer` | `inventoryTransfer`)
+ - Drafts (opcional, desactivado por defecto):
+   - `ENABLE_MULTI_DRAFTS=1` para habilitar borradores simultáneos (máx 3)
+   - `MAX_DRAFTS_PER_OWNER=3` (configurable)
 - KRONI (flujo especial Bodega→CEDIS):
   - `SHOPIFY_KRONI_LOCATION_ID` (numérico, p. ej. 98632499512) — se usa como `location_id` en forecasting y para omitir validación Shopify
   - `ODOO_KRONI_TRANSIT_LOCATION_ID` (numérico, p. ej. 43) — ubicación de tránsito en Odoo
@@ -38,5 +41,28 @@ Notas de comportamiento
   - Actualiza `forecasting_inventory_today` por fila con `location_id=98632499512` (forzado) — sin RPC.
 
 Logs (Supabase `transfer_logs`): `odoo_created`, `shopify_draft_created`/`shopify_draft_error`, `forecast_target_location`, `forecast_in_transit_applied (via=rest_forced_strict)`.
+
+API de borradores (cuando `ENABLE_MULTI_DRAFTS=1`)
+- `GET /api/transfers/drafts` → lista los borradores del owner (header opcional `X-User-Id`), máx 3.
+- `POST /api/transfers/drafts` → crea un nuevo borrador con `{ origin_id, dest_id, title?, lines? }`.
+- `PATCH /api/transfers/:id` → actualiza metadatos (`title`, `origin_id`, `dest_id`) cuando `status='draft'`.
+- `GET /api/transfers/:id/lines` → devuelve líneas del borrador.
+- `POST /api/transfers/:id/lines` → upsert de líneas (por `barcode`/`sku`) cuando `status='draft'`.
+- `DELETE /api/transfers/:id/lines/:code` → borra línea por código.
+- `POST /api/transfers/:id/cancel` → cancela borrador (`status='cancelled'`).
+- `POST /api/transfers/:id/validate` → valida el borrador (mantiene reglas actuales: Shopify+Odoo; KRONI conserva comportamiento especial). Devuelve picking y estado.
+
+Historial (cuando `ENABLE_MULTI_DRAFTS=1`)
+- `GET /api/transfers/history` → lista histórica con filtros y paginación.
+  - Query params (opcionales):
+    - `status`: lista separada por comas (ej. `validated,cancelled,odoo_created`)
+    - `owner`: si no se envía, se toma de `X-User-Id`.
+    - `origin`, `dest`.
+    - `from`, `to`: ISO (`2025-11-01T00:00:00Z`).
+    - `search`: busca en `sku`/`barcode` (transfer_lines).
+    - `page`, `pageSize` (por defecto 1/50).
+    - `format=csv` para exportar el resultado actual.
+- `POST /api/transfers/:id/duplicate` → crea un borrador nuevo copiando meta/líneas del transfer `:id`.
+  - Resp: `{ ok: true, id: <nuevo_id>, status: 'draft' }`.
 
 Desarrollo: `wrangler dev` (si el proyecto se independiza con su propio repo).

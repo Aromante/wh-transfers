@@ -47,8 +47,8 @@ Resumen de cambios desde la última versión estable subida a GitHub
   - `20251029_init_transfers.sql`
   - `20251029_transfer_locations.sql`
   - `20251029_add_shopify_location_id.sql`
-  - `20251029_shopify_transfer_drafts.sql`
- - Estado actual: `transfer_locations.shopify_location_id` ya está poblado para ubicaciones clave (WH/Existencias, KRONI/Existencias, P-CEI/Existencias, P-CON/Existencias).
+- `20251029_shopify_transfer_drafts.sql`
+- Estado actual: `transfer_locations.shopify_location_id` ya está poblado para ubicaciones clave (WH/Existencias, KRONI/Existencias, P-CEI/Existencias, P-CON/Existencias).
 
 4) Variables de entorno (Worker)
 - Odoo: `ODOO_URL`, `ODOO_DB`, `ODOO_UID`, `ODOO_API_KEY`, `ODOO_AUTO_VALIDATE=1`
@@ -190,3 +190,18 @@ Resultado
 
 Notas
 - El Escenario A se mantiene estable: validación y flujo de draft/picking sin cambios.
+
+2025-11-07 — Fix Conquista + Confirmación UI
+-------------------------------------------
+- Incidencia: en WH → P-CON el draft de Shopify quedaba con destino KRONI por mapeo incorrecto en Supabase.
+- Acción: corregido `transfer_locations.shopify_location_id` para `P-CON/Existencias` en Supabase (fuente de verdad). No se requiere variable nueva en Worker.
+- Worker: se añadió soporte opcional de override por entorno `SHOPIFY_CONQUISTA_LOCATION_ID` (numérico o GID) por si se requiere hotfix sin tocar catálogo. No se usa en producción tras el fix de Supabase.
+- Frontend: se agregó confirmación de usuario antes de crear transfer (pop‑up con resumen de Origen/Destino/Líneas/Unidades). Archivo: `src/pages/TransferPage.tsx`.
+- Validación previa: UI invoca `POST /api/transfers/validate` y muestra insuficiencia por código antes de enviar.
+- Deploy: para reflejar el cambio de confirmación, basta publicar el Pages del frontend. El Worker no requiere redeploy si no cambió su código.
+- Verificación: crear transfer WH → P-CON (pocas unidades), validar en Shopify que el destino sea Conquista y en `shopify_transfer_drafts.dest_shopify_location_id`.
+
+Siguientes pasos
+- Integración macrorepo: añadir `apps/wh-transfers` al orquestador (`macrorepo/scripts/dev-all.mjs`) y a `PersistentDashboards` del Shell. Exponer `VITE_TRANSFERS_URL`.
+- Pruebas: smoke tests (Vitest) para validación de líneas y confirmación de submit; testear que `endpointTransfers()` respete `VITE_API_BASE`.
+- Operativo: ajustar CORS en el Worker a dominios finales de Pages (producción) y previews si aplica.

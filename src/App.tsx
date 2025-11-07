@@ -1,6 +1,7 @@
 import React from 'react'
 import { Routes, Route, Link } from 'react-router-dom'
 import TransferPage from './pages/TransferPage'
+import HistoryPage from './pages/HistoryPage'
 
 export default function App() {
   return (
@@ -12,11 +13,14 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3 text-sm text-slate-600">
             <Link to="/">Inicio</Link>
+            <span>/</span>
+            <Link to="/history">Historial</Link>
           </div>
         </div>
       </nav>
       <Routes>
         <Route path="/" element={<TransferPage />} />
+        <Route path="/history" element={<HistoryPage />} />
         <Route path="*" element={<div className="p-6">No encontrado</div>} />
       </Routes>
     </div>
