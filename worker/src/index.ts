@@ -16,6 +16,7 @@ interface Env {
   SHOPIFY_INPUT_VARIANT?: string
   SHOPIFY_MUTATION_FIELD?: string
   SHOPIFY_KRONI_LOCATION_ID?: string
+  SHOPIFY_CONQUISTA_LOCATION_ID?: string
 }
 
 const ALLOWED_LOCATION_CODES = [
@@ -401,6 +402,13 @@ async function shopifyGraphQLWithVersion(env: Env, apiVersion: string, query: st
 }
 
 async function getShopifyLocationGid(env: Env, code: string) {
+  // Overrides by env (hotfix for incorrect mapping without changing DB)
+  if (code === 'P-CON/Existencias' && env.SHOPIFY_CONQUISTA_LOCATION_ID) {
+    const id = env.SHOPIFY_CONQUISTA_LOCATION_ID
+    if (String(id).startsWith('gid://')) return id
+    return `gid://shopify/Location/${id}`
+  }
+
   // Read mapping from Supabase transfer_locations.shopify_location_id
   const r = await fetch(`${env.SUPABASE_URL}/rest/v1/transfer_locations?code=eq.${encodeURIComponent(code)}&select=shopify_location_id`, { method: 'GET', headers: sbHeaders(env) })
   if (!r.ok) throw new Error(await r.text())
@@ -646,6 +654,7 @@ async function createTransfer(req: Request, env: Env) {
     const pickingTypeId = await findInternalPickingType(env)
     const srcId = await findLocationIdByCompleteName(env, origin_id)
     let dstId = 0
+    let kroniTransit = false
     if (dest_id === 'KRONI/Existencias') {
       const transitId = Number(env.ODOO_KRONI_TRANSIT_LOCATION_ID || 0)
       if (transitId > 0) dstId = transitId
@@ -653,6 +662,7 @@ async function createTransfer(req: Request, env: Env) {
         const transitName = String(env.ODOO_KRONI_TRANSIT_COMPLETE_NAME || 'Physical Locations/Traslado interno a Kroni').trim()
         dstId = await findLocationIdByCompleteName(env, transitName)
       }
+      kroniTransit = true
     } else {
       dstId = await findLocationIdByCompleteName(env, dest_id)
     }
@@ -680,13 +690,18 @@ async function createTransfer(req: Request, env: Env) {
       location_id: srcId,
       location_dest_id: dstId,
     }])
-    const pickingId: number = await odooExecuteKw(env, 'stock.picking', 'create', [{
+    const pickingVals: Record<string, any> = {
       picking_type_id: pickingTypeId,
       location_id: srcId,
       location_dest_id: dstId,
       origin: client_transfer_id,
       move_ids_without_package: moveCmds,
-    }])
+    }
+    // Requisito: marcar bandera de auto-sync para transfer WH -> KRONI (destino tránsito Kroni)
+    if (origin_id === 'WH/Existencias' && kroniTransit) {
+      pickingVals['x_krn_auto_sync_enabled'] = true
+    }
+    const pickingId: number = await odooExecuteKw(env, 'stock.picking', 'create', [pickingVals])
 
     // Confirmar y asignar
     await odooExecuteKw(env, 'stock.picking', 'action_confirm', [[pickingId]])
@@ -722,6 +737,12 @@ async function createTransfer(req: Request, env: Env) {
       qty: mv.qty,
     })))
     await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'odoo_created', detail: { pickingId, pickingName, state: pickingState } }])
+    if (origin_id === 'WH/Existencias' && kroniTransit) {
+      // Registrar explícitamente que se activó el flag de auto-sync en el picking
+      try {
+        await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'odoo_auto_sync_enabled_set', detail: { field: 'x_krn_auto_sync_enabled', value: true } }])
+      } catch {}
+    }
 
     // Registrar draft de Shopify si fue creado previamente
     try {
@@ -931,6 +952,7 @@ function getEnv(): Env {
     SHOPIFY_REPLICATE_TRANSFERS: g.SHOPIFY_REPLICATE_TRANSFERS,
     SHOPIFY_API_VERSION: g.SHOPIFY_API_VERSION,
     SHOPIFY_API_VERSION_LIST: g.SHOPIFY_API_VERSION_LIST,
+    SHOPIFY_CONQUISTA_LOCATION_ID: g.SHOPIFY_CONQUISTA_LOCATION_ID,
   }
 }
 

@@ -114,6 +114,15 @@ export default function TransferPage() {
     } finally { setBusy(false) }
   }
 
+  const confirmAndSubmit = async () => {
+    if (!lines.length || !origin || !dest) return
+    const total = totalQty
+    const msg = `¿Confirmar transferencia?\n\nOrigen: ${origin}\nDestino: ${dest}\nLíneas: ${lines.length}\nUnidades totales: ${total}\n\nEsta acción creará el picking en Odoo${dest === 'KRONI/Existencias' ? ' (destino tránsito KRONI)' : ''}${(import.meta as any).env?.VITE_API_BASE ? ' y replicará borrador en Shopify si aplica.' : '.'}`
+    const ok = typeof window !== 'undefined' ? window.confirm(msg) : true
+    if (!ok) return
+    await submit()
+  }
+
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
       <div className="mb-6">
@@ -219,7 +228,7 @@ export default function TransferPage() {
 
       <div className="mt-3 flex items-center gap-3">
         <div className="text-slate-600">Items: {lines.length} • Total unidades: {totalQty}</div>
-        <button disabled={!lines.length || busy || loading || !origin || !dest} onClick={submit} className="inline-flex items-center rounded-md bg-black text-white px-3 py-2 text-sm disabled:opacity-50">
+        <button disabled={!lines.length || busy || loading || !origin || !dest} onClick={confirmAndSubmit} className="inline-flex items-center rounded-md bg-black text-white px-3 py-2 text-sm disabled:opacity-50">
           {busy ? 'Creando…' : 'Crear transferencia'}
         </button>
       </div>

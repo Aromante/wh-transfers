@@ -18,10 +18,13 @@ Secrets/vars (wrangler):
    - `SHOPIFY_STRICT_VERSION` (1/true para usar sólo `SHOPIFY_API_VERSION` sin probar otras)
    - `SHOPIFY_INPUT_VARIANT` (`origin_destination` | `from_to` | `source_destination`)
    - `SHOPIFY_MUTATION_FIELD` (`transfer` | `inventoryTransfer`)
- - KRONI (flujo especial Bodega→CEDIS):
-   - `SHOPIFY_KRONI_LOCATION_ID` (numérico, p. ej. 98632499512) — se usa como `location_id` en forecasting y para omitir validación Shopify
-   - `ODOO_KRONI_TRANSIT_LOCATION_ID` (numérico, p. ej. 43) — ubicación de tránsito en Odoo
-   - `ODOO_KRONI_TRANSIT_COMPLETE_NAME` (opcional) — `complete_name` de la ubicación de tránsito si se desea resolver por nombre
+- KRONI (flujo especial Bodega→CEDIS):
+  - `SHOPIFY_KRONI_LOCATION_ID` (numérico, p. ej. 98632499512) — se usa como `location_id` en forecasting y para omitir validación Shopify
+  - `ODOO_KRONI_TRANSIT_LOCATION_ID` (numérico, p. ej. 43) — ubicación de tránsito en Odoo
+  - `ODOO_KRONI_TRANSIT_COMPLETE_NAME` (opcional) — `complete_name` de la ubicación de tránsito si se desea resolver por nombre
+
+- Overrides puntuales de ubicaciones Shopify (hotfix sin tocar catálogo):
+  - `SHOPIFY_CONQUISTA_LOCATION_ID` (numérico) — fuerza el destino correcto para `P-CON/Existencias` al crear el draft en Shopify
 
 Estado: En producción, las credenciales de Shopify ya están configuradas; la creación de drafts está habilitada (excepto cuando el destino es `KRONI/Existencias`, donde se omite). La validación previa aplica ahora también para KRONI para evitar parciales en Odoo.
 
