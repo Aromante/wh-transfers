@@ -1,5 +1,5 @@
 name = "transfers-worker"
-main = "src/index.ts"
+main = "src/index.js"
 compatibility_date = "2024-10-01"
 
 [vars]

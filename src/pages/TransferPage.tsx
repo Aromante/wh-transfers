@@ -24,6 +24,7 @@ export default function TransferPage() {
   const { locations, loading } = useLocations()
   const draftsFlag = isMultiDraftsEnabled()
   const { drafts, refresh: refreshDrafts } = useDrafts()
+  const [currentDraftId, setCurrentDraftId] = useState<string | null>(null)
   const [origin, setOrigin] = useState<string>('')
   const [dest, setDest] = useState<string>('')
   const [lines, setLines] = useState<Line[]>([])
@@ -91,7 +92,7 @@ export default function TransferPage() {
           setBusy(false)
           return
         }
-      } catch {}
+      } catch { }
       const o = origin.trim()
       const d = dest.trim()
       const body = {
@@ -99,6 +100,7 @@ export default function TransferPage() {
         origin_id: o,
         dest_id: d,
         lines: lines.map((l) => ({ barcode: l.code, qty: l.qty })),
+        from_draft_id: currentDraftId // Send draft ID to consume it
       }
       const r = await fetch(endpointTransfers(), {
         method: 'POST',
@@ -114,7 +116,10 @@ export default function TransferPage() {
       } else {
         setResult({ ok: false, data })
       }
-      if (r.ok) setLines([])
+      if (r.ok) {
+        setLines([])
+        setCurrentDraftId(null) // Clear draft ID on success
+      }
     } catch (e: any) {
       setResult({ ok: false, error: String(e?.message || e) })
     } finally { setBusy(false) }
@@ -140,14 +145,27 @@ export default function TransferPage() {
         title: null,
         lines: lines.map(l => ({ barcode: l.code, qty: l.qty }))
       }
-      const r = await fetch(`${endpointTransfers()}/drafts`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() }, body: JSON.stringify(body) })
+
+      let url = `${endpointTransfers()}/drafts`
+      let method = 'POST'
+
+      // If we have a current draft ID, update it instead of creating new
+      if (currentDraftId) {
+        url = `${endpointTransfers()}/drafts/${currentDraftId}`
+        method = 'PUT'
+      }
+
+      const r = await fetch(url, { method, headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() }, body: JSON.stringify(body) })
       const data = await r.json()
       if (!r.ok || data?.ok === false) {
         alert(`No se pudo guardar el borrador: ${data?.error || r.status}`)
         return
       }
       setLines([])
-      setResult({ ok: true, kind: 'draft_saved', id: data.id })
+      // If we created a new one, save the ID. If updated, keep existing (or use returned id)
+      const newId = data.id
+      setCurrentDraftId(newId)
+      setResult({ ok: true, kind: 'draft_saved', id: newId })
       refreshDrafts()
     } catch (e: any) {
       alert(`Error guardando borrador: ${String(e?.message || e)}`)
@@ -165,10 +183,11 @@ export default function TransferPage() {
       if (r.ok && Array.isArray(data?.lines)) {
         const next: Line[] = data.lines.map((ln: any) => ({ id: genId(), code: String(ln.barcode || ln.sku || ''), qty: Number(ln.qty || 0) })).filter(l => l.code && l.qty > 0)
         setLines(next)
+        setCurrentDraftId(id) // Save the ID to update it later
         setShowDrafts(false)
         setResult(null)
       }
-    } catch {}
+    } catch { }
   }
 
   const validateDraft = async (id: string) => {
@@ -223,7 +242,7 @@ export default function TransferPage() {
               onChange={(e) => {
                 const val = e.target.checked
                 setAutoFocus(val)
-                try { localStorage.setItem('wh_auto_focus', val ? '1' : '0') } catch {}
+                try { localStorage.setItem('wh_auto_focus', val ? '1' : '0') } catch { }
               }}
             />
             <span>Auto‑enfoque del escáner</span>
