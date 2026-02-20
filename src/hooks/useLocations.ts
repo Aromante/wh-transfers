@@ -1,18 +1,23 @@
 import { useEffect, useState } from 'react'
-import { hasSupabase, supabase } from '../lib/supabase'
 
 export type Location = {
-  id: string
   code: string
   name: string
   is_default_origin: boolean
+  can_be_origin: boolean
+  can_be_destination: boolean
+}
+
+function efBase() {
+  const base = (import.meta as any).env?.VITE_API_BASE || ''
+  return String(base || '').replace(/\/$/, '')
 }
 
 const FALLBACK: Location[] = [
-  { id: 'wh', code: 'WH/Existencias', name: 'Bodega de producción', is_default_origin: true },
-  { id: 'kroni', code: 'KRONI/Existencias', name: 'CEDIS (KRONI)', is_default_origin: false },
-  { id: 'p-cei', code: 'P-CEI/Existencias', name: 'Tienda CEIBA', is_default_origin: false },
-  { id: 'p-con', code: 'P-CON/Existencias', name: 'Tienda Conquista', is_default_origin: false },
+  { code: 'WH/Existencias',    name: 'Bodega de producción', is_default_origin: true,  can_be_origin: true,  can_be_destination: false },
+  { code: 'KRONI/Existencias', name: 'CEDIS (KRONI)',        is_default_origin: false, can_be_origin: false, can_be_destination: true  },
+  { code: 'P-CEI/Existencias', name: 'Tienda CEIBA',         is_default_origin: false, can_be_origin: false, can_be_destination: true  },
+  { code: 'P-CON/Existencias', name: 'Tienda Conquista',     is_default_origin: false, can_be_origin: false, can_be_destination: true  },
 ]
 
 export default function useLocations() {
@@ -26,17 +31,20 @@ export default function useLocations() {
       setLoading(true)
       setError(null)
       try {
-        if (hasSupabase) {
-          const { data, error } = await supabase
-            .from('transfer_locations')
-            .select('id, code, name, is_default_origin')
-            .order('is_default_origin', { ascending: false })
-            .order('code', { ascending: true })
-          if (error) throw error
-          if (!aborted) setData((data as any) || [])
-        } else {
-          if (!aborted) setData(FALLBACK)
-        }
+        const base = efBase()
+        if (!base) { if (!aborted) { setData(FALLBACK); setLoading(false) } return }
+        const r = await fetch(`${base}/locations`)
+        if (!r.ok) throw new Error(`locations fetch failed: ${r.status}`)
+        const json = await r.json()
+        const rows: any[] = Array.isArray(json?.data) ? json.data : (Array.isArray(json) ? json : [])
+        const mapped: Location[] = rows.map((row: any) => ({
+          code: String(row.odoo_location_code || row.code || ''),
+          name: String(row.name || ''),
+          is_default_origin: Boolean(row.can_be_origin),
+          can_be_origin: Boolean(row.can_be_origin),
+          can_be_destination: Boolean(row.can_be_destination),
+        }))
+        if (!aborted) setData(mapped.length ? mapped : FALLBACK)
       } catch (e: any) {
         if (!aborted) {
           setError(String(e?.message || e))
@@ -52,4 +60,3 @@ export default function useLocations() {
 
   return { locations: data || [], loading, error }
 }
-

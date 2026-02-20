@@ -8,17 +8,13 @@ import { getUserId } from '../lib/user'
 
 type Line = { id: string; code: string; qty: number }
 
-function apiBase() {
+// Returns the EF base URL as-is (VITE_API_BASE already points to the EF endpoint)
+function ep() {
   const base = (import.meta as any).env?.VITE_API_BASE || ''
-  return String(base || '').replace(/\/$/, '') || ''
+  return String(base || '').replace(/\/$/, '') || '/api/transfers'
 }
-function endpointTransfers() {
-  const base = apiBase()
-  if (!base) return '/api/transfers'
-  // If already points to /api/transfers, use as-is
-  if (base.endsWith('/api/transfers')) return base
-  return `${base}/api/transfers`
-}
+// Keep legacy alias used below
+const endpointTransfers = ep
 
 export default function TransferPage() {
   const { locations, loading } = useLocations()
@@ -77,21 +73,6 @@ export default function TransferPage() {
     setBusy(true)
     setResult(null)
     try {
-      // Pre-validar inventario en Shopify (aplica también a KRONI para evitar parciales)
-      try {
-        const validateUrl = `${endpointTransfers().replace(/\/api\/transfers$/, '')}/api/transfers/validate`
-        const pre = await fetch(validateUrl, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
-          body: JSON.stringify({ origin_id: origin, dest_id: dest, lines }),
-        })
-        const preData = await pre.json()
-        if (pre.ok && preData?.ok === false && Array.isArray(preData.insufficient) && preData.insufficient.length) {
-          setResult({ ok: false, kind: 'insufficient', insufficient: preData.insufficient, origin })
-          setBusy(false)
-          return
-        }
-      } catch {}
       const o = origin.trim()
       const d = dest.trim()
       const body = {
@@ -100,21 +81,21 @@ export default function TransferPage() {
         dest_id: d,
         lines: lines.map((l) => ({ barcode: l.code, qty: l.qty })),
       }
-      const r = await fetch(endpointTransfers(), {
+      const r = await fetch(ep(), {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
         body: JSON.stringify(body),
       })
       const data = await r.json()
       if (r.ok) {
-        const shopify = (data as any)?.shopify_draft || null
-        setResult({ ok: true, kind: 'success', id: (data as any)?.id, pickingName: (data as any)?.picking_name, pickingId: (data as any)?.odoo_picking_id, status: (data as any)?.status, shopify })
-      } else if (Array.isArray((data as any)?.insufficient)) {
-        setResult({ ok: false, kind: 'insufficient', insufficient: (data as any).insufficient, origin })
+        // EF returns { data: { transfer: { id, pickingId, pickingName, state }, shopify: ... } }
+        const t = (data as any)?.data?.transfer || (data as any)?.transfer || data
+        const shopify = (data as any)?.data?.shopify || (data as any)?.shopify || null
+        setResult({ ok: true, kind: 'success', id: t?.id, pickingName: t?.pickingName, pickingId: t?.pickingId, status: t?.state || t?.status, shopify })
+        setLines([])
       } else {
         setResult({ ok: false, data })
       }
-      if (r.ok) setLines([])
     } catch (e: any) {
       setResult({ ok: false, error: String(e?.message || e) })
     } finally { setBusy(false) }
@@ -140,14 +121,15 @@ export default function TransferPage() {
         title: null,
         lines: lines.map(l => ({ barcode: l.code, qty: l.qty }))
       }
-      const r = await fetch(`${endpointTransfers()}/drafts`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() }, body: JSON.stringify(body) })
+      const r = await fetch(`${ep()}/drafts`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() }, body: JSON.stringify(body) })
       const data = await r.json()
-      if (!r.ok || data?.ok === false) {
+      if (!r.ok) {
         alert(`No se pudo guardar el borrador: ${data?.error || r.status}`)
         return
       }
       setLines([])
-      setResult({ ok: true, kind: 'draft_saved', id: data.id })
+      const saved = data?.data || data
+      setResult({ ok: true, kind: 'draft_saved', id: saved?.id })
       refreshDrafts()
     } catch (e: any) {
       alert(`Error guardando borrador: ${String(e?.message || e)}`)
@@ -156,18 +138,19 @@ export default function TransferPage() {
 
   const resumeDraft = async (id: string) => {
     try {
-      const r1 = await fetch(`${endpointTransfers()}/${id}`, { headers: { 'X-User-Id': getUserId() } })
-      const meta = await r1.json().catch(() => null)
-      if (meta && meta.origin_id) setOrigin(meta.origin_id)
-      if (meta && meta.dest_id) setDest(meta.dest_id)
-      const r = await fetch(`${endpointTransfers()}/${id}/lines`, { headers: { 'X-User-Id': getUserId() } })
-      const data = await r.json()
-      if (r.ok && Array.isArray(data?.lines)) {
-        const next: Line[] = data.lines.map((ln: any) => ({ id: genId(), code: String(ln.barcode || ln.sku || ''), qty: Number(ln.qty || 0) })).filter(l => l.code && l.qty > 0)
-        setLines(next)
-        setShowDrafts(false)
-        setResult(null)
-      }
+      // GET /transfer?id=... returns transfer + embedded lines
+      const r = await fetch(`${ep()}/transfer?id=${encodeURIComponent(id)}`, { headers: { 'X-User-Id': getUserId() } })
+      const json = await r.json()
+      const meta = json?.data || json
+      if (meta?.origin_id) setOrigin(meta.origin_id)
+      if (meta?.dest_id) setDest(meta.dest_id)
+      const linesData: any[] = Array.isArray(meta?.lines) ? meta.lines : []
+      const next: Line[] = linesData
+        .map((ln: any) => ({ id: genId(), code: String(ln.barcode || ln.sku || ''), qty: Number(ln.qty || 0) }))
+        .filter(l => l.code && l.qty > 0)
+      setLines(next)
+      setShowDrafts(false)
+      setResult(null)
     } catch {}
   }
 
@@ -175,17 +158,19 @@ export default function TransferPage() {
     if (busy) return
     setBusy(true)
     try {
-      const r = await fetch(`${endpointTransfers()}/${id}/validate`, { method: 'POST', headers: { 'X-User-Id': getUserId() } })
+      // EF: POST /validate with { transfer_id }
+      const r = await fetch(`${ep()}/validate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
+        body: JSON.stringify({ transfer_id: id }),
+      })
       const data = await r.json()
-      if (r.ok && data?.ok) {
-        setResult({ ok: true, kind: 'success', id: data.id, pickingName: data.picking_name, pickingId: data.odoo_picking_id, status: data.status })
+      if (r.ok) {
+        const validated = data?.data || data
+        setResult({ ok: true, kind: 'success', id, validated: validated?.validated })
         refreshDrafts()
       } else {
-        if (Array.isArray(data?.insufficient)) {
-          setResult({ ok: false, kind: 'insufficient', insufficient: data.insufficient, origin })
-        } else {
-          setResult({ ok: false, data })
-        }
+        setResult({ ok: false, data })
       }
     } catch (e: any) {
       setResult({ ok: false, error: String(e?.message || e) })
@@ -198,11 +183,14 @@ export default function TransferPage() {
     if (!ok) return
     setBusy(true)
     try {
-      const r = await fetch(`${endpointTransfers()}/${id}/cancel`, { method: 'POST', headers: { 'X-User-Id': getUserId() } })
+      // Soft-cancel: PATCH /drafts?id=<id> with { status: 'cancelled' }
+      const r = await fetch(`${ep()}/drafts?id=${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
+        body: JSON.stringify({ status: 'cancelled' }),
+      })
       const data = await r.json().catch(() => null)
-      if (!r.ok || (data && data.ok === false)) {
-        alert(`No se pudo cancelar: ${data?.error || r.status}`)
-      }
+      if (!r.ok) alert(`No se pudo cancelar: ${data?.error || r.status}`)
       await refreshDrafts()
     } catch (e: any) {
       alert(`Error al cancelar: ${String(e?.message || e)}`)
@@ -345,27 +333,18 @@ export default function TransferPage() {
             </div>
           ) : result.kind === 'success' ? (
             <div className="text-slate-800">
-              <div className="font-semibold mb-2">Transferencia creada correctamente</div>
-              <div>
-                Picking: <span className="font-mono">{result.pickingName || result.pickingId}</span>
-                {result.status && <span className="ml-2 text-slate-500">(estado: {result.status})</span>}
+              <div className="font-semibold mb-2">
+                {result.validated !== undefined ? 'Transferencia validada' : 'Transferencia creada correctamente'}
               </div>
-              {result.shopify ? (
-                result.shopify.created ? (
-                  <div className="mt-2 text-green-700">Draft en Shopify creado (ID: <span className="font-mono">{result.shopify.id}</span>).</div>
-                ) : (
-                  <div className="mt-2">
-                    <a
-                      className="inline-flex items-center rounded-md border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
-                      href={`${endpointTransfers().replace(/\/api\/transfers$/, '')}/api/transfers/${result.id}/shopify-draft.csv`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Descargar Draft CSV para Shopify
-                    </a>
-                  </div>
-                )
-              ) : null}
+              {result.pickingName && (
+                <div>
+                  Picking: <span className="font-mono">{result.pickingName}</span>
+                  {result.status && <span className="ml-2 text-slate-500">(estado: {result.status})</span>}
+                </div>
+              )}
+              {result.shopify?.id && (
+                <div className="mt-2 text-green-700">Replicado en Shopify (ID: <span className="font-mono">{result.shopify.id}</span>).</div>
+              )}
             </div>
           ) : (
             <pre className="rounded bg-slate-900 text-slate-100 p-3 text-xs overflow-auto">{JSON.stringify(result, null, 2)}</pre>
@@ -384,7 +363,7 @@ export default function TransferPage() {
               <div key={d.id} className="py-2 flex items-center gap-3">
                 <div className="flex-1">
                   <div className="font-medium">{d.draft_title || d.id}</div>
-                  <div className="text-xs text-slate-500">{d.origin_id || '—'} → {d.dest_id || '—'} • {new Date(d.updated_at || d.created_at).toLocaleString()}</div>
+                  <div className="text-xs text-slate-500">{d.origin_id || '—'} → {d.dest_id || '—'} • {new Date(d.updated_at || d.created_at || '').toLocaleString()}</div>
                 </div>
                 <button onClick={() => resumeDraft(d.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Reanudar</button>
                 <button onClick={() => validateDraft(d.id)} className="inline-flex items-center rounded-md bg-black text-white px-2 py-1 text-xs">Validar</button>

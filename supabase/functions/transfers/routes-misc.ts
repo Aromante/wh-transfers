@@ -1,6 +1,6 @@
 // History, locations, health, duplicate, CSV routes
 import { type Env, boolFlag, parseListParam } from './helpers.ts'
-import { sbSelect, sbInsert, sbLog, sbGetTransfer, sbGetTransferLines, sbListLocations } from './supabase-helpers.ts'
+import { sbSelect, sbInsert, sbLogTransfer, sbGetTransferById, sbGetTransferLinesByTransferId, sbListLocations } from './supabase-helpers.ts'
 import { shopifyGraphQLWithVersion } from './shopify.ts'
 
 export async function handleGetLocations(env: Env) {
@@ -14,9 +14,9 @@ export async function handleGetTransfer(req: Request, env: Env) {
     const url = new URL(req.url)
     const id = url.searchParams.get('id')
     if (!id) return { error: 'id requerido', status: 400 }
-    const transfer = await sbGetTransfer(env, id)
+    const transfer = await sbGetTransferById(env, id)
     if (!transfer) return { error: 'Transfer no encontrado', status: 404 }
-    const lines = await sbGetTransferLines(env, id)
+    const lines = await sbGetTransferLinesByTransferId(env, id)
     return { data: { ...transfer, lines } }
 }
 
@@ -61,9 +61,9 @@ export async function handleDuplicateTransfer(req: Request, env: Env) {
     const body = await req.json()
     const { transfer_id } = body as any
     if (!transfer_id) return { error: 'transfer_id requerido', status: 400 }
-    const transfer = await sbGetTransfer(env, transfer_id)
+    const transfer = await sbGetTransferById(env, transfer_id)
     if (!transfer) return { error: 'Transfer no encontrado', status: 404 }
-    const lines = await sbGetTransferLines(env, transfer_id)
+    const lines = await sbGetTransferLinesByTransferId(env, transfer_id)
 
     const newId = crypto.randomUUID()
     await sbInsert(env, 'transfers', [{
@@ -78,7 +78,7 @@ export async function handleDuplicateTransfer(req: Request, env: Env) {
         }))
         try { await sbInsert(env, 'transfer_lines', newLines) } catch { }
     }
-    await sbLog(env, newId, 'duplicated_from', { source_id: transfer_id })
+    await sbLogTransfer(env, newId, 'duplicated_from', { source_id: transfer_id })
     return { data: { id: newId, duplicated_from: transfer_id } }
 }
 

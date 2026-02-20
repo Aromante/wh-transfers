@@ -1,15 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getUserId } from '../lib/user'
 
-function apiBase() {
+function efBase() {
   const base = (import.meta as any).env?.VITE_API_BASE || ''
-  return String(base || '').replace(/\/$/, '') || ''
-}
-function endpointTransfers() {
-  const base = apiBase()
-  if (!base) return '/api/transfers'
-  if (base.endsWith('/api/transfers')) return base
-  return `${base}/api/transfers`
+  return String(base || '').replace(/\/$/, '')
 }
 
 export type DraftItem = {
@@ -20,6 +14,7 @@ export type DraftItem = {
   status: string
   draft_title: string | null
   updated_at?: string
+  created_at?: string
 }
 
 export default function useDrafts() {
@@ -30,11 +25,18 @@ export default function useDrafts() {
   const refresh = useCallback(async () => {
     setLoading(true); setError(null)
     try {
-      const url = `${endpointTransfers()}/drafts?limit=3`
+      const base = efBase()
+      const url = base
+        ? `${base}/drafts?limit=3`
+        : `/api/transfers/drafts?limit=3`
       const r = await fetch(url, { headers: { 'X-User-Id': getUserId() } })
-      const data = await r.json()
-      if (!r.ok || data?.ok === false) throw new Error(data?.error || 'fetch_failed')
-      setDrafts(Array.isArray(data?.drafts) ? data.drafts : [])
+      const json = await r.json()
+      if (!r.ok) throw new Error(json?.error || 'fetch_failed')
+      // EF returns { data: [...] }; fallback also handles legacy { drafts: [...] }
+      const list = Array.isArray(json?.data) ? json.data
+                 : Array.isArray(json?.drafts) ? json.drafts
+                 : []
+      setDrafts(list)
     } catch (e: any) { setError(String(e?.message || e)) }
     finally { setLoading(false) }
   }, [])

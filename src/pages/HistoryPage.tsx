@@ -2,30 +2,27 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { getUserId } from '../lib/user'
 import useLocations from '../hooks/useLocations'
 
-function apiBase() {
+function ep() {
   const base = (import.meta as any).env?.VITE_API_BASE || ''
-  return String(base || '').replace(/\/$/, '') || ''
+  return String(base || '').replace(/\/$/, '') || '/api/transfers'
 }
-function endpointTransfers() {
-  const base = apiBase()
-  if (!base) return '/api/transfers'
-  if (base.endsWith('/api/transfers')) return base
-  return `${base}/api/transfers`
-}
+
+type Line = { id?: string; barcode?: string | null; sku?: string | null; qty: number; product_name?: string | null; box_barcode?: string | null }
 
 type Row = {
   id: string
   client_transfer_id: string
   origin_id: string
   dest_id: string
+  origin_name?: string | null
+  dest_name?: string | null
   status: string
   draft_owner: string
   draft_title: string | null
   picking_name: string | null
   created_at: string
+  lines?: Line[] | null
 }
-
-type Line = { id?: string; barcode?: string | null; sku?: string | null; qty: number }
 
 export default function HistoryPage() {
   const [status, setStatus] = useState<string>('')
@@ -37,24 +34,23 @@ export default function HistoryPage() {
   const [page, setPage] = useState<number>(1)
   const [pageSize, setPageSize] = useState<number>(20)
   const [rows, setRows] = useState<Row[]>([])
-  const [total, setTotal] = useState<number>(0)
   const [loading, setLoading] = useState<boolean>(false)
   const [error, setError] = useState<string | null>(null)
-  const [expanded, setExpanded] = useState<Record<string, { loading: boolean; error: string | null; lines: Line[] }>>({})
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
   const { locations } = useLocations()
 
+  // EF uses limit/offset — compute from page/pageSize
   const qs = useMemo(() => {
     const usp = new URLSearchParams()
-    // owner opcional: por defecto muestra todos
     if (status) usp.set('status', status)
     if (origin) usp.set('origin', origin)
     if (dest) usp.set('dest', dest)
     if (from) usp.set('from', from)
     if (to) usp.set('to', to)
     if (search) usp.set('search', search)
-    usp.set('page', String(page))
-    usp.set('pageSize', String(pageSize))
+    usp.set('limit', String(pageSize))
+    usp.set('offset', String((page - 1) * pageSize))
     return usp.toString()
   }, [status, origin, dest, from, to, search, page, pageSize])
 
@@ -63,11 +59,13 @@ export default function HistoryPage() {
     async function load() {
       setLoading(true); setError(null)
       try {
-        const url = `${endpointTransfers()}/history?${qs}`
+        const url = `${ep()}/history?${qs}`
         const r = await fetch(url, { headers: { 'X-User-Id': getUserId() } })
-        const data = await r.json()
-        if (!r.ok || data?.ok === false) throw new Error(data?.error || 'fetch_failed')
-        if (!aborted) { setRows(data.rows || []); setTotal(Number(data.total || 0)) }
+        const json = await r.json()
+        if (!r.ok) throw new Error(json?.error || 'fetch_failed')
+        // EF returns { data: [...] } — lines are embedded in each row by transfer_log view
+        const list: Row[] = Array.isArray(json?.data) ? json.data : []
+        if (!aborted) setRows(list)
       } catch (e: any) { if (!aborted) setError(String(e?.message || e)) }
       finally { if (!aborted) setLoading(false) }
     }
@@ -75,44 +73,36 @@ export default function HistoryPage() {
     return () => { aborted = true }
   }, [qs])
 
-  const totalPages = Math.max(1, Math.ceil((total || 0) / pageSize))
+  const hasMore = rows.length === pageSize
+  const totalPages = page + (hasMore ? 1 : 0)
 
   const downloadCsv = () => {
-    const url = `${endpointTransfers()}/history?${qs}&format=csv`
-    window.open(url, '_blank')
+    window.open(`${ep()}/history/csv?${qs}`, '_blank')
   }
 
   const duplicate = async (id: string) => {
     try {
-      const r = await fetch(`${endpointTransfers()}/${id}/duplicate`, { method: 'POST', headers: { 'X-User-Id': getUserId() } })
+      // EF: POST /duplicate with { transfer_id } in body
+      const r = await fetch(`${ep()}/duplicate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
+        body: JSON.stringify({ transfer_id: id }),
+      })
       const data = await r.json()
-      if (!r.ok || data?.ok === false) throw new Error(data?.error || r.status)
+      if (!r.ok) throw new Error(data?.error || r.status)
       alert('Borrador creado a partir del historial')
     } catch (e: any) {
       alert(`No se pudo duplicar: ${String(e?.message || e)}`)
     }
   }
 
-  const toggleExpand = async (id: string) => {
-    const state = expanded[id]
-    // toggle close
-    if (state && !state.loading && state.lines && state.lines.length >= 0) {
-      const next = { ...expanded }
-      delete next[id]
-      setExpanded(next)
-      return
-    }
-    // open and fetch if needed
-    setExpanded(prev => ({ ...prev, [id]: { loading: true, error: null, lines: [] } }))
-    try {
-      const r = await fetch(`${endpointTransfers()}/${id}/lines`, { headers: { 'X-User-Id': getUserId() } })
-      const data = await r.json()
-      if (!r.ok || data?.ok === false) throw new Error(data?.error || 'fetch_lines_failed')
-      const lines: Line[] = Array.isArray(data?.lines) ? data.lines : []
-      setExpanded(prev => ({ ...prev, [id]: { loading: false, error: null, lines } }))
-    } catch (e: any) {
-      setExpanded(prev => ({ ...prev, [id]: { loading: false, error: String(e?.message || e), lines: [] } }))
-    }
+  // Lines are embedded in each row from the transfer_log view — no separate fetch needed
+  const toggleExpand = (id: string) => {
+    setExpanded(prev => {
+      const next = { ...prev }
+      if (next[id]) { delete next[id] } else { next[id] = true }
+      return next
+    })
   }
 
   return (
@@ -154,7 +144,7 @@ export default function HistoryPage() {
       <div className="mt-3 flex items-center gap-2">
         <button onClick={() => setPage(1)} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50">Aplicar</button>
         <button onClick={downloadCsv} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50">Descargar CSV</button>
-        <div className="ml-auto text-sm text-slate-600">{total} resultados</div>
+        <div className="ml-auto text-sm text-slate-600">{rows.length} resultados</div>
       </div>
       <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white">
         <table className="w-full text-sm">
@@ -170,67 +160,70 @@ export default function HistoryPage() {
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => (
-              <React.Fragment key={r.id}>
-                <tr className="odd:bg-white even:bg-slate-50/50">
-                  <td className="px-3 py-2 border-b">
-                    <button onClick={() => toggleExpand(r.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">
-                      {expanded[r.id] ? 'Ocultar' : 'Ver'}
-                    </button>
-                  </td>
-                  <td className="px-3 py-2 border-b">{new Date(r.created_at).toLocaleString()}</td>
-                  <td className="px-3 py-2 border-b">{r.origin_id}</td>
-                  <td className="px-3 py-2 border-b">{r.dest_id}</td>
-                  <td className="px-3 py-2 border-b">{r.status}</td>
-                  <td className="px-3 py-2 border-b">{r.picking_name || '—'}</td>
-                  <td className="px-3 py-2 border-b">
-                    <button onClick={() => duplicate(r.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Duplicar como borrador</button>
-                  </td>
-                </tr>
-                {expanded[r.id] && (
-                  <tr>
-                    <td className="px-3 py-2 border-b bg-slate-50" colSpan={7}>
-                      {expanded[r.id].loading ? (
-                        <div className="text-sm text-slate-600">Cargando líneas…</div>
-                      ) : expanded[r.id].error ? (
-                        <div className="text-sm text-red-600">{expanded[r.id].error}</div>
-                      ) : (expanded[r.id].lines.length ? (
-                        <div className="overflow-auto">
-                          <table className="w-full text-sm">
-                            <thead>
-                              <tr className="text-left">
-                                <th className="px-2 py-1 border-b">Código</th>
-                                <th className="px-2 py-1 border-b">Cantidad</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {expanded[r.id].lines.map((ln, idx) => (
-                                <tr key={ln.id || idx}>
-                                  <td className="px-2 py-1 border-b font-mono text-xs">{ln.sku || ln.barcode || '—'}</td>
-                                  <td className="px-2 py-1 border-b">{ln.qty}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ) : (
-                        <div className="text-sm text-slate-600">Sin líneas registradas</div>
-                      ))}
+            {rows.map(r => {
+              const embeddedLines: Line[] = Array.isArray(r.lines) ? r.lines : []
+              return (
+                <React.Fragment key={r.id}>
+                  <tr className="odd:bg-white even:bg-slate-50/50">
+                    <td className="px-3 py-2 border-b">
+                      <button onClick={() => toggleExpand(r.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">
+                        {expanded[r.id] ? 'Ocultar' : 'Ver'}
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 border-b">{new Date(r.created_at).toLocaleString()}</td>
+                    <td className="px-3 py-2 border-b">{r.origin_name || r.origin_id}</td>
+                    <td className="px-3 py-2 border-b">{r.dest_name || r.dest_id}</td>
+                    <td className="px-3 py-2 border-b">{r.status}</td>
+                    <td className="px-3 py-2 border-b">{r.picking_name || '—'}</td>
+                    <td className="px-3 py-2 border-b">
+                      <button onClick={() => duplicate(r.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Duplicar como borrador</button>
                     </td>
                   </tr>
-                )}
-              </React.Fragment>
-            ))}
+                  {expanded[r.id] && (
+                    <tr>
+                      <td className="px-3 py-2 border-b bg-slate-50" colSpan={7}>
+                        {embeddedLines.length ? (
+                          <div className="overflow-auto">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="text-left">
+                                  <th className="px-2 py-1 border-b">SKU / Código</th>
+                                  <th className="px-2 py-1 border-b">Producto</th>
+                                  <th className="px-2 py-1 border-b">Cantidad</th>
+                                  <th className="px-2 py-1 border-b">Caja</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {embeddedLines.map((ln, idx) => (
+                                  <tr key={ln.id || idx}>
+                                    <td className="px-2 py-1 border-b font-mono text-xs">{ln.sku || ln.barcode || '—'}</td>
+                                    <td className="px-2 py-1 border-b text-xs">{ln.product_name || '—'}</td>
+                                    <td className="px-2 py-1 border-b">{ln.qty}</td>
+                                    <td className="px-2 py-1 border-b font-mono text-xs">{ln.box_barcode || '—'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <div className="text-sm text-slate-600">Sin líneas registradas</div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              )
+            })}
             {!rows.length && (
-              <tr><td className="px-3 py-6 text-slate-500" colSpan={6}>{loading ? 'Cargando…' : (error || 'Sin resultados')}</td></tr>
+              <tr><td className="px-3 py-6 text-slate-500" colSpan={7}>{loading ? 'Cargando…' : (error || 'Sin resultados')}</td></tr>
             )}
           </tbody>
         </table>
       </div>
       <div className="mt-3 flex items-center gap-2">
         <button disabled={page<=1} onClick={() => setPage(p => Math.max(1, p-1))} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-50">Prev</button>
-        <div className="text-sm">Página {page} / {totalPages}</div>
-        <button disabled={page>=totalPages} onClick={() => setPage(p => p+1)} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-50">Next</button>
+        <div className="text-sm">Página {page}{hasMore ? '+' : ''}</div>
+        <button disabled={!hasMore} onClick={() => setPage(p => p+1)} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-50">Next</button>
         <div className="ml-auto text-sm">
           <label>PageSize
             <select value={pageSize} onChange={e => { setPage(1); setPageSize(Number(e.target.value)) }} className="ml-2 rounded-md border border-slate-300 px-2 py-1 text-sm">
