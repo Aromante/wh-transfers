@@ -6,7 +6,7 @@ import {
     sbGetLocation, sbGetByClientTransferId, sbGetTransferById,
     sbUpdateTransferById, sbLogTransfer, resolveBox, type LocationRow,
 } from './supabase-helpers.ts'
-import { shopifyGraphQL, resolveVariantsBatch } from './shopify.ts'
+import { shopifyGraphQL, shopifyGraphQLWithVersion, resolveVariantsBatch } from './shopify.ts'
 
 export async function handleCreateTransfer(req: Request, env: Env) {
     const body = await req.json()
@@ -207,11 +207,56 @@ async function replicateToShopify(env: Env, transferId: string, originLoc: Locat
         const errors = data?.inventoryTransferCreate?.userErrors
         if (errors?.length) throw new Error(`Shopify userErrors: ${JSON.stringify(errors)}`)
         if (transfer) {
-            // Log shopify result — columns shopify_transfer_id/shopify_status don't exist yet in transfers table
             await sbLogTransfer(env, transferId, 'shopify_created', { shopifyTransferId: transfer.id, shopifyStatus: transfer.status })
         }
         return transfer
     }
+
+    // ── origin/destination variant (inventoryTransfer field mutation — "unstable" API) ──
+    // This is the proven variant used by the Cloudflare worker for all production transfers.
+    if (inputVariant === 'origin/destination') {
+        const mutField = String(env.SHOPIFY_MUTATION_FIELD || 'inventoryTransfer')
+        const apiVer = String(env.SHOPIFY_API_VERSION || 'unstable')
+
+        const lineItems = lines.map((ln: any) => {
+            const code = String(ln.sku || ln.barcode || '').trim()
+            const v = varMap.get(code)
+            if (!v) return null
+            return { inventoryItemId: v.inventoryItem.id, quantity: Number(ln.qty || 1) }
+        }).filter(Boolean)
+        if (!lineItems.length) return { skipped: true, reason: 'no variants resolved' }
+
+        const mutation = `mutation {
+            ${mutField}(
+                origin: { locationId: "${originGid}" }
+                destination: { locationId: "${destGid}" }
+                lineItems: [${lineItems.map((li: any) => `{ inventoryItemId: "${li.inventoryItemId}", quantity: ${li.quantity} }`).join(', ')}]
+            ) {
+                inventoryTransfer { id name status }
+                userErrors { field message }
+            }
+        }`
+
+        const result = await shopifyGraphQLWithVersion(env, apiVer, mutation)
+        if (!result.ok) throw new Error(`Shopify error: ${JSON.stringify(result.raw?.errors || result.raw)}`)
+        const transfer = result.raw?.data?.[mutField]?.inventoryTransfer
+        const errors = result.raw?.data?.[mutField]?.userErrors
+        if (errors?.length) throw new Error(`Shopify userErrors: ${JSON.stringify(errors)}`)
+        if (transfer) {
+            await sbLogTransfer(env, transferId, 'shopify_draft_created', {
+                shopify_transfer_id: transfer.id,
+                name: transfer.name,
+                status: transfer.status,
+                origin_gid: originGid,
+                dest_gid: destGid,
+                api_version: apiVer,
+                input_variant: inputVariant,
+                mutation: `${mutField}-field`,
+            })
+        }
+        return transfer
+    }
+
     return null
 }
 
