@@ -58,29 +58,6 @@ export async function sbDelete(env: Env, table: string, query: string) {
     return true
 }
 
-// V2 table helpers
-export async function sbGetTransfer(env: Env, id: string) {
-    const rows = await sbSelect(env, 'transfer_summary_v2', `id=eq.${encodeURIComponent(id)}&select=*`)
-    return rows?.[0] || null
-}
-
-export async function sbGetTransferLines(env: Env, id: string) {
-    return sbSelect(env, 'transfer_lines_v2', `transfer_id=eq.${encodeURIComponent(id)}&select=id,barcode,sku,qty,product_id`)
-}
-
-export async function sbUpdateTransfer(env: Env, id: string, patch: Record<string, any>) {
-    const rows = await sbPatch(env, 'transfer_summary_v2', `id=eq.${encodeURIComponent(id)}`, patch)
-    return rows?.[0] || null
-}
-
-export async function sbGetByClientId(env: Env, clientId: string) {
-    return sbSelect(env, 'transfer_summary_v2', `client_transfer_id=eq.${encodeURIComponent(clientId)}&select=id,odoo_picking_id,picking_name,status`)
-}
-
-export async function sbLog(env: Env, transferId: string, event: string, detail: any) {
-    try { await sbInsert(env, 'transfer_log_v2', [{ transfer_id: transferId, event, detail }]) } catch { }
-}
-
 // ── Location helpers (reads from transfer_locations VIEW) ──
 export async function sbGetLocation(env: Env, code: string): Promise<LocationRow | null> {
     const rows = await sbSelect(env, 'transfer_locations', `odoo_location_code=eq.${encodeURIComponent(code)}&select=*`)
