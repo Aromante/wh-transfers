@@ -1,0 +1,12 @@
+# For local `wrangler dev` only (do not commit real secrets)
+# Non-secret
+SUPABASE_URL=https://<project>.supabase.co
+CORS_ORIGIN=http://127.0.0.1:8085
+
+# Secrets (allowed here only for local dev convenience; do not commit)
+SUPABASE_SERVICE_ROLE=xxx
+ODOO_URL=https://odoo.example.com
+ODOO_DB=<db_name>
+ODOO_UID=1
+ODOO_API_KEY=<api_key>
+

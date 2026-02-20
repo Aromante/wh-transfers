@@ -1,0 +1,14 @@
+{
+  "name": "wh-transfers-worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy:staging": "wrangler deploy --env=staging",
+    "deploy:prod": "wrangler deploy --env=production"
+  },
+  "devDependencies": {
+    "wrangler": "^4.45.3"
+  }
+}
