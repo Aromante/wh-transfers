@@ -2,10 +2,11 @@
 // Serves as Deno-based equivalent of the Cloudflare Worker
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { type Env, corsHeaders, json, mustEnv } from './helpers.ts'
-import { handleCreateTransfer, handleValidateTransfer } from './routes-transfer.ts'
+import { handleCreateTransfer, handleReceiveTransfer, handleCancelTransfer, handleValidateTransfer } from './routes-transfer.ts'
 import { handleListDrafts, handleCreateDraft, handleUpdateDraft, handleDeleteDraft, handleCommitDraft } from './routes-drafts.ts'
-import { handleGetLocations, handleGetTransfer, handleHistory, handleHistoryCSV, handleDuplicateTransfer, handleHealth, handleGetLogs } from './routes-misc.ts'
+import { handleGetLocations, handleGetTransfer, handleHistory, handleHistoryCSV, handleDuplicateTransfer, handleHealth, handleGetLogs, handleResolveCode, handleAdjustPlantaInventory } from './routes-misc.ts'
 import { handleListBoxes, handleGetBox, handleResolveBox, handleCreateBox, handleUpdateBox, handleDeleteBox } from './routes-boxes.ts'
+import { handleShopifyTransferWebhook, handleRegisterWebhooks } from './routes-webhook.ts'
 
 function envFromDeno(): Env {
     const g = (k: string, def = '') => Deno.env.get(k) || def
@@ -19,7 +20,7 @@ function envFromDeno(): Env {
         CORS_ORIGIN: g('CORS_ORIGIN', '*'),
         ODOO_AUTO_VALIDATE: g('ODOO_AUTO_VALIDATE', '1'),
         SHOPIFY_DOMAIN: g('SHOPIFY_DOMAIN'),
-        SHOPIFY_ACCESS_TOKEN: g('SHOPIFY_ACCESS_TOKEN'),
+        SHOPIFY_ACCESS_TOKEN: g('SHOPIFY_ACCESS_TOKEN_TRANSFERS'),
         SHOPIFY_REPLICATE_TRANSFERS: g('SHOPIFY_REPLICATE_TRANSFERS', '1'),
         SHOPIFY_API_VERSION: g('SHOPIFY_API_VERSION', 'unstable'),
         SHOPIFY_API_VERSION_LIST: g('SHOPIFY_API_VERSION_LIST'),
@@ -28,8 +29,6 @@ function envFromDeno(): Env {
         SHOPIFY_MUTATION_FIELD: g('SHOPIFY_MUTATION_FIELD', 'inventoryTransfer'),
         SHOPIFY_KRONI_LOCATION_ID: g('SHOPIFY_KRONI_LOCATION_ID'),
         SHOPIFY_CONQUISTA_LOCATION_ID: g('SHOPIFY_CONQUISTA_LOCATION_ID'),
-        ODOO_KRONI_TRANSIT_LOCATION_ID: g('ODOO_KRONI_TRANSIT_LOCATION_ID'),
-        ODOO_KRONI_TRANSIT_COMPLETE_NAME: g('ODOO_KRONI_TRANSIT_COMPLETE_NAME'),
         ENABLE_MULTI_DRAFTS: g('ENABLE_MULTI_DRAFTS', '1'),
         MAX_DRAFTS_PER_OWNER: g('MAX_DRAFTS_PER_OWNER', '3'),
     }
@@ -53,6 +52,10 @@ serve(async (req: Request) => {
         // ── Transfer CRUD ──
         if (req.method === 'POST' && (path === '/' || path === '/create'))
             result = await handleCreateTransfer(req, env)
+        else if (req.method === 'POST' && path === '/receive')
+            result = await handleReceiveTransfer(req, env)
+        else if (req.method === 'POST' && path === '/cancel')
+            result = await handleCancelTransfer(req, env)
         else if (req.method === 'POST' && path === '/validate')
             result = await handleValidateTransfer(req, env)
         else if (req.method === 'GET' && path === '/transfer')
@@ -84,6 +87,10 @@ serve(async (req: Request) => {
         else if (req.method === 'GET' && path === '/logs')
             result = await handleGetLogs(req, env)
 
+        // ── Resolve code (barcode/SKU validation) ──
+        else if (req.method === 'GET' && path === '/resolve')
+            result = await handleResolveCode(req, env)
+
         // ── Locations ──
         else if (req.method === 'GET' && path === '/locations')
             result = await handleGetLocations(env)
@@ -101,6 +108,16 @@ serve(async (req: Request) => {
             result = await handleUpdateBox(req, env)
         else if (req.method === 'DELETE' && path === '/boxes')
             result = await handleDeleteBox(req, env)
+
+        // ── Webhooks (Shopify → EF, no CORS needed) ──
+        else if (req.method === 'POST' && path === '/webhook/shopify-transfer')
+            result = await handleShopifyTransferWebhook(req, env)
+        else if (req.method === 'POST' && path === '/webhook/register')
+            result = await handleRegisterWebhooks(req, env)
+
+        // ── Shopify manual adjustments ──
+        else if (req.method === 'POST' && path === '/shopify/adjust-planta')
+            result = await handleAdjustPlantaInventory(req, env)
 
         // ── Health ──
         else if (req.method === 'GET' && path === '/health')

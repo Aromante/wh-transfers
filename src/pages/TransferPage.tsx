@@ -26,15 +26,19 @@ export default function TransferPage() {
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<any>(null)
   const [showDrafts, setShowDrafts] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [cancelingDraftId, setCancelingDraftId] = useState<string | null>(null)
+  const [scanError, setScanError] = useState<string | null>(null)
+  const [resolving, setResolving] = useState(false)
   const [autoFocus, setAutoFocus] = useState<boolean>(() => {
     try { return localStorage.getItem('wh_auto_focus') !== '0' } catch { return true }
   })
 
   useEffect(() => {
     if (locations.length) {
-      const def = locations.find(l => l.is_default_origin)?.code || locations[0].code
+      const def = locations.find(l => l.can_be_origin)?.code || locations[0].code
       setOrigin((prev) => prev || def)
-      const firstDest = locations.find(l => l.code !== def)?.code || locations[0].code
+      const firstDest = locations.find(l => l.can_be_destination && l.code !== def)?.code || locations[0].code
       setDest((prev) => prev || firstDest)
     }
   }, [locations])
@@ -52,16 +56,33 @@ export default function TransferPage() {
     return m
   }, [result])
 
-  const onScan = (code: string) => {
-    setLines((prev) => {
-      const idx = prev.findIndex((l) => l.code === code)
-      if (idx >= 0) {
-        const copy = [...prev]
-        copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 }
-        return copy
+  const onScan = async (code: string) => {
+    setScanError(null)
+    // If already in the list, just increment — no need to re-validate
+    const existing = lines.find(l => l.code === code)
+    if (existing) {
+      setLines(prev => prev.map(l => l.id === existing.id ? { ...l, qty: l.qty + 1 } : l))
+      return
+    }
+    // Validate against EF before adding
+    setResolving(true)
+    try {
+      const r = await fetch(`${ep()}/resolve?code=${encodeURIComponent(code)}`, {
+        headers: { 'X-User-Id': getUserId() },
+      })
+      const data = await r.json()
+      if (!r.ok) {
+        setScanError(`"${code}" no encontrado en el catálogo. Verifica el código e intenta de nuevo.`)
+        return
       }
-      return [...prev, { id: genId(), code, qty: 1 }]
-    })
+      // Always 1 — means "1 box" or "1 unit". The EF multiplies by qty_per_box internally.
+      const qty = 1
+      setLines(prev => [...prev, { id: genId(), code, qty }])
+    } catch (e: any) {
+      setScanError(`Error validando "${code}": ${String(e?.message || e)}`)
+    } finally {
+      setResolving(false)
+    }
   }
 
   const removeLine = (id: string) => setLines((prev) => prev.filter((l) => l.id !== id))
@@ -88,13 +109,20 @@ export default function TransferPage() {
       })
       const data = await r.json()
       if (r.ok) {
-        // EF returns { data: { transfer: { id, pickingId, pickingName, state }, shopify: ... } }
+        // EF returns { data: { transfer: { id, status: 'pending' }, message } }
         const t = (data as any)?.data?.transfer || (data as any)?.transfer || data
-        const shopify = (data as any)?.data?.shopify || (data as any)?.shopify || null
-        setResult({ ok: true, kind: 'success', id: t?.id, pickingName: t?.pickingName, pickingId: t?.pickingId, status: t?.state || t?.status, shopify })
+        const message = (data as any)?.data?.message || null
+        setResult({ ok: true, kind: 'success', id: t?.id, status: t?.status, message })
         setLines([])
+        setConfirming(false)
       } else {
-        setResult({ ok: false, data })
+        // Unwrap EF error response — stock check returns { kind:'insufficient', origin, insufficient:[...] }
+        const inner = (data as any)?.data || data
+        if (inner?.kind === 'insufficient') {
+          setResult({ ok: false, kind: 'insufficient', origin: inner.origin, insufficient: inner.insufficient })
+        } else {
+          setResult({ ok: false, data })
+        }
       }
     } catch (e: any) {
       setResult({ ok: false, error: String(e?.message || e) })
@@ -103,10 +131,7 @@ export default function TransferPage() {
 
   const confirmAndSubmit = async () => {
     if (!lines.length || !origin || !dest) return
-    const total = totalQty
-    const msg = `¿Confirmar transferencia?\n\nOrigen: ${origin}\nDestino: ${dest}\nLíneas: ${lines.length}\nUnidades totales: ${total}\n\nEsta acción creará el picking en Odoo${dest === 'KRONI/Existencias' ? ' (destino tránsito KRONI)' : ''}${(import.meta as any).env?.VITE_API_BASE ? ' y replicará borrador en Shopify si aplica.' : '.'}`
-    const ok = typeof window !== 'undefined' ? window.confirm(msg) : true
-    if (!ok) return
+    setConfirming(false)
     await submit()
   }
 
@@ -179,8 +204,7 @@ export default function TransferPage() {
 
   const cancelDraft = async (id: string) => {
     if (busy) return
-    const ok = typeof window !== 'undefined' ? window.confirm('¿Cancelar este borrador? Esta acción no elimina los datos del historial, pero lo quita de la lista de activos.') : true
-    if (!ok) return
+    setCancelingDraftId(null)
     setBusy(true)
     try {
       // Soft-cancel: PATCH /drafts?id=<id> with { status: 'cancelled' }
@@ -203,7 +227,7 @@ export default function TransferPage() {
         <div className="font-suisseMono text-xs text-slate-500">OPERACIONES</div>
         <h1 className="mt-1 text-3xl font-semibold tracking-tight">Nueva transferencia</h1>
         <div className="mt-2 flex items-center justify-between gap-4">
-          <p className="text-slate-600">Escanea productos y confirma para crear el picking en Odoo.</p>
+          <p className="text-slate-600">Escanea productos y confirma el envío. El receptor lo recibirá en la pestaña Recepción.</p>
           <label className="flex items-center gap-2 text-sm select-none">
             <input
               type="checkbox"
@@ -229,12 +253,12 @@ export default function TransferPage() {
               const next = e.target.value
               setOrigin(next)
               if (dest === next) {
-                const alt = (locations || []).find(l => l.code !== next)?.code
+                const alt = (locations || []).find(l => l.can_be_destination && l.code !== next)?.code
                 if (alt) setDest(alt)
               }
             }}
           >
-            {(locations || []).map((loc) => (
+            {(locations || []).filter(l => l.can_be_origin).map((loc) => (
               <option key={loc.code} value={loc.code}>{loc.code} — {loc.name}</option>
             ))}
           </select>
@@ -246,7 +270,7 @@ export default function TransferPage() {
             value={dest}
             onChange={(e) => setDest(e.target.value)}
           >
-            {(locations || []).filter(l => l.code !== origin).map((loc) => (
+            {(locations || []).filter(l => l.can_be_destination && l.code !== origin).map((loc) => (
               <option key={loc.code} value={loc.code}>{loc.code} — {loc.name}</option>
             ))}
           </select>
@@ -255,6 +279,15 @@ export default function TransferPage() {
 
       <div className="mt-4">
         <ScannerInput onScan={onScan} autoFocusEnabled={autoFocus} />
+        {resolving && (
+          <div className="mt-2 text-xs text-slate-500">Validando código…</div>
+        )}
+        {scanError && !resolving && (
+          <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            <span className="flex-1">{scanError}</span>
+            <button onClick={() => setScanError(null)} className="shrink-0 font-bold hover:text-red-900">✕</button>
+          </div>
+        )}
       </div>
 
       <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white">
@@ -300,22 +333,57 @@ export default function TransferPage() {
         </table>
       </div>
 
-      <div className="mt-3 flex items-center gap-3">
+      <div className="mt-3 flex items-center gap-3 flex-wrap">
         <div className="text-slate-600">Items: {lines.length} • Total unidades: {totalQty}</div>
-        <button disabled={!lines.length || busy || loading || !origin || !dest} onClick={confirmAndSubmit} className="inline-flex items-center rounded-md bg-black text-white px-3 py-2 text-sm disabled:opacity-50">
-          {busy ? 'Creando…' : 'Crear transferencia'}
-        </button>
-        {draftsFlag && (
+        {!confirming && (
           <>
-            <button disabled={!lines.length || busy || loading || !origin || !dest} onClick={saveAsDraft} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50">
-              Guardar como borrador
+            <button
+              disabled={!lines.length || busy || loading || !origin || !dest}
+              onClick={() => setConfirming(true)}
+              className="inline-flex items-center rounded-md bg-black text-white px-3 py-2 text-sm disabled:opacity-50"
+            >
+              Enviar transferencia
             </button>
-            <button type="button" onClick={() => setShowDrafts(v => !v)} className="ml-auto inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50">
-              {showDrafts ? 'Ocultar borradores' : 'Mis borradores'}
-            </button>
+            {draftsFlag && (
+              <>
+                <button disabled={!lines.length || busy || loading || !origin || !dest} onClick={saveAsDraft} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50">
+                  Guardar como borrador
+                </button>
+                <button type="button" onClick={() => setShowDrafts(v => !v)} className="ml-auto inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50">
+                  {showDrafts ? 'Ocultar borradores' : 'Mis borradores'}
+                </button>
+              </>
+            )}
           </>
         )}
       </div>
+
+      {/* Inline confirm panel */}
+      {confirming && (
+        <div className="mt-3 rounded-lg border border-slate-300 bg-slate-50 p-4">
+          <p className="text-sm font-medium text-slate-800 mb-1">¿Confirmar envío?</p>
+          <p className="text-xs text-slate-500 mb-3">
+            {origin} → {dest} · {lines.length} líneas · {totalQty} unidades totales
+            <br />El receptor verá esta orden en la pestaña <span className="font-medium">Recepción</span>.
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              disabled={busy}
+              onClick={confirmAndSubmit}
+              className="inline-flex items-center rounded-md bg-black text-white px-4 py-2 text-sm disabled:opacity-50"
+            >
+              {busy ? 'Enviando…' : 'Sí, enviar'}
+            </button>
+            <button
+              disabled={busy}
+              onClick={() => setConfirming(false)}
+              className="inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-white disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
 
       {result && (
         <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4 text-sm">
@@ -333,17 +401,14 @@ export default function TransferPage() {
             </div>
           ) : result.kind === 'success' ? (
             <div className="text-slate-800">
-              <div className="font-semibold mb-2">
-                {result.validated !== undefined ? 'Transferencia validada' : 'Transferencia creada correctamente'}
+              <div className="font-semibold mb-1 text-green-700">
+                ✓ Orden de transferencia creada
               </div>
-              {result.pickingName && (
-                <div>
-                  Picking: <span className="font-mono">{result.pickingName}</span>
-                  {result.status && <span className="ml-2 text-slate-500">(estado: {result.status})</span>}
-                </div>
-              )}
-              {result.shopify?.id && (
-                <div className="mt-2 text-green-700">Replicado en Shopify (ID: <span className="font-mono">{result.shopify.id}</span>).</div>
+              <div className="text-slate-600 text-xs mt-1">
+                {result.message || 'Pendiente de recepción en destino.'}
+              </div>
+              {result.id && (
+                <div className="mt-2 text-xs text-slate-400 font-mono">ID: {result.id}</div>
               )}
             </div>
           ) : (
@@ -360,14 +425,27 @@ export default function TransferPage() {
           </div>
           <div className="mt-3 divide-y">
             {drafts.length ? drafts.map((d) => (
-              <div key={d.id} className="py-2 flex items-center gap-3">
-                <div className="flex-1">
-                  <div className="font-medium">{d.draft_title || d.id}</div>
-                  <div className="text-xs text-slate-500">{d.origin_id || '—'} → {d.dest_id || '—'} • {new Date(d.updated_at || d.created_at || '').toLocaleString()}</div>
+              <div key={d.id} className="py-2">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1">
+                    <div className="font-medium">{d.draft_title || d.id}</div>
+                    <div className="text-xs text-slate-500">{d.origin_id || '—'} → {d.dest_id || '—'} • {new Date(d.updated_at || d.created_at || '').toLocaleString()}</div>
+                  </div>
+                  {cancelingDraftId !== d.id && (
+                    <>
+                      <button onClick={() => resumeDraft(d.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Reanudar</button>
+                      <button onClick={() => validateDraft(d.id)} className="inline-flex items-center rounded-md bg-black text-white px-2 py-1 text-xs">Validar</button>
+                      <button onClick={() => setCancelingDraftId(d.id)} className="inline-flex items-center rounded-md border border-red-300 text-red-700 px-2 py-1 text-xs hover:bg-red-50">Cancelar</button>
+                    </>
+                  )}
                 </div>
-                <button onClick={() => resumeDraft(d.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Reanudar</button>
-                <button onClick={() => validateDraft(d.id)} className="inline-flex items-center rounded-md bg-black text-white px-2 py-1 text-xs">Validar</button>
-                <button onClick={() => cancelDraft(d.id)} className="inline-flex items-center rounded-md border border-red-300 text-red-700 px-2 py-1 text-xs hover:bg-red-50">Cancelar</button>
+                {cancelingDraftId === d.id && (
+                  <div className="mt-2 rounded-md border border-red-200 bg-red-50 p-2 flex items-center gap-2">
+                    <span className="text-xs text-red-700 flex-1">¿Cancelar este borrador?</span>
+                    <button onClick={() => cancelDraft(d.id)} disabled={busy} className="inline-flex items-center rounded-md bg-red-600 text-white px-2 py-1 text-xs hover:bg-red-700 disabled:opacity-50">Sí</button>
+                    <button onClick={() => setCancelingDraftId(null)} disabled={busy} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-white disabled:opacity-50">No</button>
+                  </div>
+                )}
               </div>
             )) : (
               <div className="py-2 text-slate-500">No tienes borradores.

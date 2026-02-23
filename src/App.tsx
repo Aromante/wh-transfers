@@ -1,7 +1,23 @@
 import React from 'react'
-import { Routes, Route, Link } from 'react-router-dom'
+import { Routes, Route, Link, useLocation } from 'react-router-dom'
 import TransferPage from './pages/TransferPage'
+import ReceivePage from './pages/ReceivePage'
 import HistoryPage from './pages/HistoryPage'
+
+function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
+  const { pathname } = useLocation()
+  const active = pathname === to
+  return (
+    <Link
+      to={to}
+      className={active
+        ? 'font-medium text-slate-900'
+        : 'text-slate-500 hover:text-slate-800'}
+    >
+      {children}
+    </Link>
+  )
+}
 
 export default function App() {
   return (
@@ -11,15 +27,18 @@ export default function App() {
           <div className="flex items-center gap-3">
             <span className="font-semibold tracking-tight">Warehouse Transfers</span>
           </div>
-          <div className="flex items-center gap-3 text-sm text-slate-600">
-            <Link to="/">Inicio</Link>
-            <span>/</span>
-            <Link to="/history">Historial</Link>
+          <div className="flex items-center gap-4 text-sm">
+            <NavLink to="/">Envío</NavLink>
+            <span className="text-slate-200">/</span>
+            <NavLink to="/receive">Recepción</NavLink>
+            <span className="text-slate-200">/</span>
+            <NavLink to="/history">Historial</NavLink>
           </div>
         </div>
       </nav>
       <Routes>
         <Route path="/" element={<TransferPage />} />
+        <Route path="/receive" element={<ReceivePage />} />
         <Route path="/history" element={<HistoryPage />} />
         <Route path="*" element={<div className="p-6">No encontrado</div>} />
       </Routes>

@@ -50,17 +50,117 @@ export async function findProductByCode(env: Env, code: string) {
 
 export async function findProductsByCodes(env: Env, codesIn: string[]) {
     const codes = Array.from(new Set(codesIn.map(c => String(c || '').trim()).filter(Boolean)))
-    const map = new Map<string, { id: number; name: string; uom_id: number }>()
+    const map = new Map<string, { id: number; name: string; uom_id: number; shopify_inventory_item_id: number | null }>()
     for (const part of chunk(codes, 80)) {
         const domain = ['|', ['barcode', 'in', part], ['default_code', 'in', part]] as any
-        const rows: any[] = await odooExecuteKw(env, 'product.product', 'search_read', [domain], { fields: ['id', 'display_name', 'uom_id', 'barcode', 'default_code'], limit: 2000 })
+        const rows: any[] = await odooExecuteKw(env, 'product.product', 'search_read', [domain], { fields: ['id', 'display_name', 'uom_id', 'barcode', 'default_code', 'x_shopify_inventory_item_id'], limit: 2000 })
         for (const row of rows || []) {
             const uomId = Array.isArray(row.uom_id) ? row.uom_id[0] : row.uom_id
-            const val = { id: Number(row.id), name: String(row.display_name || ''), uom_id: Number(uomId) }
+            const shopifyItemId = row.x_shopify_inventory_item_id ? Number(row.x_shopify_inventory_item_id) : null
+            const val = { id: Number(row.id), name: String(row.display_name || ''), uom_id: Number(uomId), shopify_inventory_item_id: shopifyItemId }
             const bc = String(row.barcode || '').trim()
             const sku = String(row.default_code || '').trim()
             if (bc && !map.has(bc)) map.set(bc, val)
             if (sku && !map.has(sku)) map.set(sku, val)
+        }
+    }
+    return map
+}
+
+// ── Create a picking directly as done from a lines map (sku → qty) ───────────
+// Used both from routes-transfer.ts (immediate) and routes-webhook.ts (fallback)
+export async function createOdooPickingFromLines(
+    env: Env,
+    originId: string,         // e.g. "WH/Existencias"
+    destId: string,           // e.g. "KRONI/Existencias"
+    linesBySku: Map<string, number>,  // sku/barcode → qty
+    originRef: string,        // free-text origin reference (e.g. transfer UUID or shopify GID)
+    transferId: string,       // internal UUID for logging
+    logFn?: (env: Env, id: string, event: string, data: any) => Promise<void>,
+    destLocIdOverride?: number, // if provided, skip the Odoo location lookup for destId
+): Promise<{ pickingId: number; pickingName: string; finalState: string }> {
+    const skus = [...linesBySku.keys()]
+    const prodMap = await findProductsByCodes(env, skus)
+    const pickingTypeId = await findInternalPickingType(env)
+    const originLocId = await findLocationIdByCompleteName(env, originId)
+    const destLocId = destLocIdOverride ?? await findLocationIdByCompleteName(env, destId)
+
+    const moveLines: any[] = []
+    const skippedSkus: string[] = []
+
+    for (const [sku, qty] of linesBySku) {
+        if (qty <= 0) continue
+        const prod = prodMap.get(sku)
+        if (!prod) { skippedSkus.push(sku); continue }
+        moveLines.push([0, 0, {
+            product_id: prod.id,
+            product_uom: prod.uom_id,
+            product_uom_qty: qty,
+            name: prod.name,
+            location_id: originLocId,
+            location_dest_id: destLocId,
+        }])
+    }
+
+    if (!moveLines.length) throw new Error(`Ningún SKU encontrado en Odoo. Faltantes: ${skippedSkus.join(', ')}`)
+
+    if (skippedSkus.length > 0 && logFn) {
+        await logFn(env, transferId, 'odoo_skus_not_found', { skus: skippedSkus })
+    }
+
+    const pickingId: number = await odooCreate(env, 'stock.picking', {
+        picking_type_id: pickingTypeId,
+        location_id: originLocId,
+        location_dest_id: destLocId,
+        move_ids_without_package: moveLines,
+        origin: originRef,
+    })
+
+    // Confirm
+    try { await odooExecuteKw(env, 'stock.picking', 'action_confirm', [[pickingId]]) } catch { }
+
+    // Validate (done)
+    let finalState = 'confirmed'
+    try {
+        const ok = await validatePicking(env, pickingId)
+        if (ok) finalState = 'done'
+    } catch (e: any) {
+        if (logFn) await logFn(env, transferId, 'odoo_validate_error', { pickingId, error: (e as Error).message })
+    }
+
+    const pickRows = await odooRead(env, 'stock.picking', [pickingId], ['name', 'state'])
+    const pickingName = pickRows?.[0]?.name || `picking-${pickingId}`
+
+    return { pickingId, pickingName, finalState }
+}
+
+// ── Query available stock (free qty) at a location for multiple products ─────
+// Returns Map<productId, freeQty> where freeQty = quantity - reserved_quantity
+// Uses stock.quant (Odoo's physical inventory ledger)
+export async function getStockAtLocation(
+    env: Env,
+    productIds: number[],
+    locationId: number,
+): Promise<Map<number, number>> {
+    const map = new Map<number, number>()
+    if (!productIds.length) return map
+    for (const part of chunk(productIds, 50)) {
+        const domain = [
+            ['location_id', '=', locationId],
+            ['product_id', 'in', part],
+        ]
+        const rows: any[] = await odooExecuteKw(
+            env, 'stock.quant', 'search_read',
+            [domain],
+            { fields: ['product_id', 'quantity', 'reserved_quantity'], limit: 500 },
+        )
+        for (const row of rows || []) {
+            const prodId = Array.isArray(row.product_id) ? row.product_id[0] : row.product_id
+            const total = Number(row.quantity || 0)
+            const reserved = Number(row.reserved_quantity || 0)
+            const free = Math.max(0, total - reserved)
+            // Accumulate in case there are multiple quant records for the same product
+            map.set(Number(prodId), (map.get(Number(prodId)) || 0) + free)
         }
     }
     return map
