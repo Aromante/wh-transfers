@@ -6,6 +6,16 @@ import { getUserId } from '../lib/user'
 
 type Line = { id: string; code: string; qty: number }
 
+/** Strips "[SKU-CODE] " prefix and parentheses → "Eclipse Certero 30 ML" */
+function cleanProductName(name: string | null | undefined): string {
+  if (!name) return ''
+  return name
+    .replace(/^\[.*?\]\s*/, '')
+    .replace(/[()]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 function ep() {
   const base = (import.meta as any).env?.VITE_API_BASE || ''
   return String(base || '').replace(/\/$/, '') || '/api/transfers'
@@ -233,7 +243,7 @@ export default function TransferPage() {
                 >
                   <span>
                     <span className="font-mono text-xs text-slate-500 mr-2">{s.code}</span>
-                    <span className="text-slate-800">{s.name}</span>
+                    <span className="text-slate-800">{cleanProductName(s.name)}</span>
                   </span>
                   {s.qty_per_box && (
                     <span className="text-xs text-slate-400 shrink-0">{s.qty_per_box} pzs/caja</span>

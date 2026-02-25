@@ -32,6 +32,16 @@ function folio(id: string) {
   return id.slice(0, 8).toUpperCase()
 }
 
+/** Strips "[SKU-CODE] " prefix and parentheses → "Eclipse Certero 30 ML" */
+function cleanProductName(name: string | null | undefined): string {
+  if (!name) return ''
+  return name
+    .replace(/^\[.*?\]\s*/, '')
+    .replace(/[()]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 function StatusPill({ status }: { status: string }) {
   const map: Record<string, { label: string; cls: string }> = {
     pending:   { label: 'Pendiente',  cls: 'bg-amber-100 text-amber-800' },
@@ -356,7 +366,7 @@ export default function ReceivePage() {
                                 )}
                                 <span className="font-mono text-slate-700 truncate">{ln.sku || ln.barcode}</span>
                                 {ln.product_name && (
-                                  <span className="text-slate-400 truncate hidden sm:block">· {ln.product_name}</span>
+                                  <span className="text-slate-400 truncate hidden sm:block">· {cleanProductName(ln.product_name)}</span>
                                 )}
                               </div>
                               <span className="ml-3 font-semibold text-slate-800 shrink-0">{ln.qty} u.</span>

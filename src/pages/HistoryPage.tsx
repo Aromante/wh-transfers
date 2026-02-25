@@ -44,6 +44,16 @@ function folio(id: string) {
   return id.slice(0, 8).toUpperCase()
 }
 
+/** Strips "[SKU-CODE] " prefix and parentheses → "Eclipse Certero 30 ML" */
+function cleanProductName(name: string | null | undefined): string {
+  if (!name) return '—'
+  return name
+    .replace(/^\[.*?\]\s*/, '')   // remove [SKU] prefix
+    .replace(/[()]/g, '')          // remove parentheses
+    .replace(/\s+/g, ' ')          // collapse extra spaces
+    .trim()
+}
+
 const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   pending:      { label: 'Pendiente',  cls: 'bg-amber-100 text-amber-800' },
   validated:    { label: 'Validado',   cls: 'bg-green-100 text-green-800' },
@@ -448,7 +458,7 @@ export default function HistoryPage() {
                                     <tr key={ln.id || idx} className="border-b border-slate-100 last:border-0">
                                       <td className="py-1 pr-3 font-mono text-slate-700">{ln.sku || ln.barcode || '—'}</td>
                                       <td className="py-1 pr-3 text-slate-500 hidden sm:table-cell truncate max-w-[200px]">
-                                        {ln.product_name || '—'}
+                                        {cleanProductName(ln.product_name)}
                                       </td>
                                       <td className="py-1 pr-3 text-right font-semibold text-slate-800">{ln.qty}</td>
                                       <td className="py-1 font-mono text-slate-400 hidden md:table-cell">
