@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import ScannerInput from '../components/ScannerInput'
+import { LocationLabel, locMeta } from '../components/LocationSelect'
 import { genId } from '../lib/uuid'
 import { getUserId } from '../lib/user'
 
@@ -307,12 +308,12 @@ export default function ReceivePage() {
                     </div>
 
                     {/* Row 2: Origen → Destino */}
-                    <div className="mt-2 flex items-center gap-1.5 text-sm">
-                      <span className="rounded bg-slate-100 px-2 py-0.5 font-medium text-slate-700">{t.origin_id}</span>
+                    <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                      <LocationLabel code={t.origin_id} />
                       <svg className="h-3.5 w-3.5 text-slate-400 shrink-0" viewBox="0 0 20 20" fill="currentColor">
                         <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
                       </svg>
-                      <span className="rounded bg-slate-100 px-2 py-0.5 font-medium text-slate-700">{t.dest_id}</span>
+                      <LocationLabel code={t.dest_id} />
                     </div>
 
                     {/* Row 3: Summary chips */}
@@ -457,13 +458,13 @@ export default function ReceivePage() {
             <span className="text-slate-400 w-14 shrink-0 text-xs">Folio</span>
             <span className="font-mono font-semibold text-slate-800">#{folio(selected?.transfer_id || '')}</span>
           </div>
-          <div className="flex items-center gap-1.5 text-sm">
+          <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-slate-400 w-14 shrink-0 text-xs">Ruta</span>
-            <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">{selected?.origin_id}</span>
+            {selected?.origin_id && <LocationLabel code={selected.origin_id} />}
             <svg className="h-3 w-3 text-slate-400 shrink-0" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
             </svg>
-            <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">{selected?.dest_id}</span>
+            {selected?.dest_id && <LocationLabel code={selected.dest_id} />}
           </div>
           <div className="flex items-center gap-1.5 text-sm">
             <span className="text-slate-400 w-14 shrink-0 text-xs">Fecha</span>
@@ -624,7 +625,7 @@ export default function ReceivePage() {
             <div className="mt-3 rounded-xl border border-slate-300 bg-slate-50 p-4">
               <p className="text-sm font-semibold text-slate-800 mb-1">¿Confirmar recepción?</p>
               <p className="text-xs text-slate-500 mb-3">
-                {selected?.origin_id} → {selected?.dest_id} · {lines.filter(l => l.qty > 0).length} SKUs · {totalQty} unidades.
+                {locMeta(selected?.origin_id || '').name} → {locMeta(selected?.dest_id || '').name} · {lines.filter(l => l.qty > 0).length} SKUs · {totalQty} unidades.
                 <br />Esto creará el picking en Odoo como <span className="font-mono bg-slate-200 rounded px-1">done</span>.
               </p>
               <div className="flex items-center gap-2">
