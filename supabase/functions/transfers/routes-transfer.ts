@@ -9,9 +9,9 @@
 // Source: Odoo stock.location id=43 — update here if the location is ever recreated in Odoo
 const KRONI_TRANSIT_LOC_ID = 43
 
-import { type Env, getOwner } from './helpers.ts'
+import { type Env, getOwner, gidToLegacyId } from './helpers.ts'
 import { validatePicking, createOdooPickingFromLines, findProductsByCodes, getStockAtLocation } from './odoo.ts'
-import { syncShopifyTransfer, adjustShopifyPlantaInventory } from './shopify.ts'
+import { syncShopifyTransfer, adjustShopifyPlantaInventory, resolveVariantsBatch } from './shopify.ts'
 import {
     sbInsert,
     sbGetLocation, sbGetTransferById,
@@ -258,6 +258,33 @@ export async function handleReceiveTransfer(req: Request, env: Env) {
                 )
             }
         }
+        // Fallback: if Odoo x_shopify_inventory_item_id is not populated,
+        // resolve inventory item IDs directly from Shopify by SKU/barcode
+        if (itemQtyMap.size === 0 && linesBySku.size > 0) {
+            const missingSkus = [...linesBySku.keys()].filter(sku => !prodMap.get(sku)?.shopify_inventory_item_id)
+            await sbLogTransfer(env, transfer_id, 'shopify_item_lookup_fallback', {
+                reason: 'odoo_shopify_item_ids_missing',
+                missing_skus: missingSkus,
+            })
+            try {
+                const shopifyVariants = await resolveVariantsBatch(env, [...linesBySku.keys()])
+                for (const [sku, qty] of linesBySku) {
+                    const variant = shopifyVariants.get(sku)
+                    const itemGid: string | undefined = variant?.inventoryItem?.id
+                    if (itemGid) {
+                        const numericId = Number(gidToLegacyId(itemGid))
+                        if (numericId) {
+                            itemQtyMap.set(numericId, (itemQtyMap.get(numericId) || 0) + qty)
+                        }
+                    }
+                }
+            } catch (fallbackErr: any) {
+                await sbLogTransfer(env, transfer_id, 'shopify_item_lookup_fallback_error', {
+                    error: String(fallbackErr?.message || fallbackErr),
+                })
+            }
+        }
+
         if (itemQtyMap.size > 0) {
             if (isKroni) {
                 // KRONI: only subtract from Planta Productora, do NOT create a Shopify transfer
