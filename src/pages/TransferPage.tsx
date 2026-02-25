@@ -4,7 +4,7 @@ import LocationSelect from '../components/LocationSelect'
 import { genId } from '../lib/uuid'
 import { getUserId } from '../lib/user'
 
-type Line = { id: string; code: string; qty: number }
+type Line = { id: string; code: string; qty: number; name?: string | null; qtyPerBox?: number | null }
 
 /** Strips "[SKU-CODE] " prefix and parentheses → "Eclipse Certero 30 ML" */
 function cleanProductName(name: string | null | undefined): string {
@@ -56,7 +56,8 @@ export default function TransferPage() {
     }
   }, [locations])
 
-  const totalQty = useMemo(() => lines.reduce((a, b) => a + b.qty, 0), [lines])
+  const totalQty    = useMemo(() => lines.reduce((a, b) => a + b.qty, 0), [lines])
+  const totalUnits  = useMemo(() => lines.reduce((a, b) => a + b.qty * (b.qtyPerBox ?? 1), 0), [lines])
 
   const insuffByCode = useMemo(() => {
     const m = new Map<string, { available: number; requested: number }>()
@@ -69,11 +70,16 @@ export default function TransferPage() {
   }, [result])
 
   // ── Scanner / barcode scan ────────────────────────────────────────────────
-  const onScan = async (code: string) => {
+  const onScan = async (code: string, prefetched?: { name: string; qty_per_box: number | null }) => {
     setScanError(null)
     const existing = lines.find(l => l.code === code)
     if (existing) {
       setLines(prev => prev.map(l => l.id === existing.id ? { ...l, qty: l.qty + 1 } : l))
+      return
+    }
+    // Use prefetched data (from autocomplete) to avoid a second round-trip
+    if (prefetched) {
+      setLines(prev => [...prev, { id: genId(), code, qty: 1, name: prefetched.name, qtyPerBox: prefetched.qty_per_box }])
       return
     }
     setResolving(true)
@@ -85,7 +91,9 @@ export default function TransferPage() {
         setScanError(`"${code}" no encontrado en el catálogo. Verifica el código e intenta de nuevo.`)
         return
       }
-      setLines(prev => [...prev, { id: genId(), code, qty: 1 }])
+      const data = await r.json()
+      const d = data?.data || data
+      setLines(prev => [...prev, { id: genId(), code, qty: 1, name: d?.name ?? null, qtyPerBox: d?.qty_per_box ?? null }])
     } catch (e: any) {
       setScanError(`Error validando "${code}": ${String(e?.message || e)}`)
     } finally {
@@ -127,11 +135,11 @@ export default function TransferPage() {
     if (e.key === 'Escape') { setShowSuggestions(false); setSuggestions([]) }
   }
 
-  const selectSuggestion = (code: string) => {
+  const selectSuggestion = (s: { code: string; name: string; qty_per_box: number | null }) => {
     setShowSuggestions(false)
     setSuggestions([])
     setManualInput('')
-    onScan(code)
+    onScan(s.code, { name: s.name, qty_per_box: s.qty_per_box })
   }
 
   const removeLine = (id: string) => setLines((prev) => prev.filter((l) => l.id !== id))
@@ -238,7 +246,7 @@ export default function TransferPage() {
                 <button
                   key={s.code}
                   type="button"
-                  onMouseDown={() => selectSuggestion(s.code)}
+                  onMouseDown={() => selectSuggestion(s)}
                   className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center justify-between gap-2"
                 >
                   <span>
@@ -270,40 +278,65 @@ export default function TransferPage() {
       <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white">
         <table className="w-full text-sm">
           <thead>
-            <tr className="bg-slate-50 text-left">
-              <th className="px-3 py-2 border-b border-slate-200">Código</th>
-              <th className="px-3 py-2 border-b border-slate-200">Cantidad</th>
-              <th className="px-3 py-2 border-b border-slate-200" />
+            <tr className="bg-slate-50 text-left text-xs text-slate-500 uppercase tracking-wide">
+              <th className="px-3 py-2 border-b border-slate-200 font-medium">Código</th>
+              <th className="px-3 py-2 border-b border-slate-200 font-medium">Cajas</th>
+              <th className="px-3 py-2 border-b border-slate-200 font-medium text-right">Total pzs</th>
+              <th className="px-3 py-2 border-b border-slate-200 w-20" />
             </tr>
           </thead>
           <tbody>
-            {lines.map((l) => (
-              <tr key={l.id} className="odd:bg-white even:bg-slate-50/50">
-                <td className="px-3 py-2 border-b border-slate-100 font-mono text-xs">{l.code}</td>
-                <td className="px-3 py-2 border-b border-slate-100">
-                  <div className="inline-flex items-center gap-2">
-                    <button type="button" onClick={() => incQty(l.id, -1)} className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">-</button>
-                    <input
-                      type="number"
-                      min={1}
-                      value={l.qty}
-                      onChange={(e) => setQty(l.id, Number(e.target.value))}
-                      className="w-20 rounded-md border border-slate-300 px-2 py-1 text-sm"
-                    />
-                    <button type="button" onClick={() => incQty(l.id, +1)} className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">+</button>
-                  </div>
-                  {insuffByCode.has(l.code) && (
-                    <div className="mt-1 text-xs text-red-600">Disponible: {insuffByCode.get(l.code)!.available} en "{origin}"</div>
-                  )}
-                </td>
-                <td className="px-3 py-2 border-b border-slate-100 text-right">
-                  <button type="button" onClick={() => removeLine(l.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Eliminar</button>
-                </td>
-              </tr>
-            ))}
+            {lines.map((l) => {
+              const totalPzs = l.qty * (l.qtyPerBox ?? 1)
+              const isBox = !!l.qtyPerBox
+              return (
+                <tr key={l.id} className="odd:bg-white even:bg-slate-50/50">
+                  {/* Código + descripción */}
+                  <td className="px-3 py-2 border-b border-slate-100">
+                    <span className="font-mono text-xs text-slate-800">{l.code}</span>
+                    {l.name && (
+                      <div className="text-xs text-slate-400 mt-0.5 truncate max-w-[220px]">
+                        {cleanProductName(l.name)}
+                        {isBox && <span className="ml-1 text-slate-300">· Caja {l.qtyPerBox} pzs</span>}
+                      </div>
+                    )}
+                    {!l.name && isBox && (
+                      <div className="text-xs text-slate-400 mt-0.5">Caja · {l.qtyPerBox} pzs</div>
+                    )}
+                  </td>
+                  {/* Cantidad de cajas */}
+                  <td className="px-3 py-2 border-b border-slate-100">
+                    <div className="inline-flex items-center gap-1.5">
+                      <button type="button" onClick={() => incQty(l.id, -1)} className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">-</button>
+                      <input
+                        type="number"
+                        min={1}
+                        value={l.qty}
+                        onChange={(e) => setQty(l.id, Number(e.target.value))}
+                        className="w-16 rounded-md border border-slate-300 px-2 py-1 text-sm text-center"
+                      />
+                      <button type="button" onClick={() => incQty(l.id, +1)} className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">+</button>
+                    </div>
+                    {insuffByCode.has(l.code) && (
+                      <div className="mt-1 text-xs text-red-600">Disponible: {insuffByCode.get(l.code)!.available} en "{origin}"</div>
+                    )}
+                  </td>
+                  {/* Total piezas */}
+                  <td className="px-3 py-2 border-b border-slate-100 text-right">
+                    <span className={`font-semibold tabular-nums ${isBox ? 'text-slate-800' : 'text-slate-400'}`}>
+                      {totalPzs}
+                    </span>
+                    {isBox && <div className="text-xs text-slate-400">pzs</div>}
+                  </td>
+                  <td className="px-3 py-2 border-b border-slate-100 text-right">
+                    <button type="button" onClick={() => removeLine(l.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Eliminar</button>
+                  </td>
+                </tr>
+              )
+            })}
             {!lines.length && (
               <tr>
-                <td colSpan={3} className="px-3 py-4 text-slate-400">Sin productos aún</td>
+                <td colSpan={4} className="px-3 py-4 text-slate-400">Sin productos aún</td>
               </tr>
             )}
           </tbody>
@@ -312,7 +345,12 @@ export default function TransferPage() {
 
       {/* Acciones */}
       <div className="mt-3 flex items-center gap-3 flex-wrap">
-        <div className="text-slate-600">Items: {lines.length} • Total unidades: {totalQty}</div>
+        <div className="text-slate-600">
+          {lines.length} línea{lines.length !== 1 ? 's' : ''}
+          {' · '}
+          {totalQty} caja{totalQty !== 1 ? 's' : ''}
+          {totalUnits !== totalQty && <> · <span className="font-semibold">{totalUnits} pzs</span></>}
+        </div>
         {!confirming && (
           <button
             disabled={!lines.length || busy || loading || !origin || !dest}
@@ -329,7 +367,7 @@ export default function TransferPage() {
         <div className="mt-3 rounded-lg border border-slate-300 bg-slate-50 p-4">
           <p className="text-sm font-medium text-slate-800 mb-1">¿Confirmar envío?</p>
           <p className="text-xs text-slate-500 mb-3">
-            {origin} → {dest} · {lines.length} líneas · {totalQty} unidades totales
+            {origin} → {dest} · {lines.length} líneas · {totalQty} caja{totalQty !== 1 ? 's' : ''} · {totalUnits} pzs
             <br />El receptor verá esta orden en la pestaña <span className="font-medium">Recepción</span>.
           </p>
           <div className="flex items-center gap-2">
