@@ -59,6 +59,16 @@ export default function TransferPage() {
   const totalQty    = useMemo(() => lines.reduce((a, b) => a + b.qty, 0), [lines])
   const totalUnits  = useMemo(() => lines.reduce((a, b) => a + b.qty * (b.qtyPerBox ?? 1), 0), [lines])
 
+  // Sum of units per product (grouped by cleaned name, fallback to code)
+  const productTotals = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const l of lines) {
+      const key = (l.name ? cleanProductName(l.name) : null) || l.code
+      m.set(key, (m.get(key) ?? 0) + l.qty * (l.qtyPerBox ?? 1))
+    }
+    return m
+  }, [lines])
+
   const insuffByCode = useMemo(() => {
     const m = new Map<string, { available: number; requested: number }>()
     if (result && result.kind === 'insufficient' && Array.isArray(result.insufficient)) {
@@ -280,15 +290,16 @@ export default function TransferPage() {
           <thead>
             <tr className="bg-slate-50 text-left text-xs text-slate-500 uppercase tracking-wide">
               <th className="px-3 py-2 border-b border-slate-200 font-medium">Código</th>
-              <th className="px-3 py-2 border-b border-slate-200 font-medium">Cajas</th>
+              <th className="px-3 py-2 border-b border-slate-200 font-medium">Cant</th>
               <th className="px-3 py-2 border-b border-slate-200 font-medium text-right">Total pzs</th>
               <th className="px-3 py-2 border-b border-slate-200 w-20" />
             </tr>
           </thead>
           <tbody>
             {lines.map((l) => {
-              const totalPzs = l.qty * (l.qtyPerBox ?? 1)
               const isBox = !!l.qtyPerBox
+              const nameKey = (l.name ? cleanProductName(l.name) : null) || l.code
+              const productTotal = productTotals.get(nameKey) ?? l.qty * (l.qtyPerBox ?? 1)
               return (
                 <tr key={l.id} className="odd:bg-white even:bg-slate-50/50">
                   {/* Código + descripción */}
@@ -304,7 +315,7 @@ export default function TransferPage() {
                       <div className="text-xs text-slate-400 mt-0.5">Caja · {l.qtyPerBox} pzs</div>
                     )}
                   </td>
-                  {/* Cantidad de cajas */}
+                  {/* Cantidad */}
                   <td className="px-3 py-2 border-b border-slate-100">
                     <div className="inline-flex items-center gap-1.5">
                       <button type="button" onClick={() => incQty(l.id, -1)} className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">-</button>
@@ -321,12 +332,12 @@ export default function TransferPage() {
                       <div className="mt-1 text-xs text-red-600">Disponible: {insuffByCode.get(l.code)!.available} en "{origin}"</div>
                     )}
                   </td>
-                  {/* Total piezas */}
+                  {/* Total piezas del mismo producto */}
                   <td className="px-3 py-2 border-b border-slate-100 text-right">
-                    <span className={`font-semibold tabular-nums ${isBox ? 'text-slate-800' : 'text-slate-400'}`}>
-                      {totalPzs}
+                    <span className="font-semibold tabular-nums text-slate-800">
+                      {productTotal}
                     </span>
-                    {isBox && <div className="text-xs text-slate-400">pzs</div>}
+                    <div className="text-xs text-slate-400">pzs</div>
                   </td>
                   <td className="px-3 py-2 border-b border-slate-100 text-right">
                     <button type="button" onClick={() => removeLine(l.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Eliminar</button>
