@@ -16,6 +16,15 @@ function cleanProductName(name: string | null | undefined): string {
     .trim()
 }
 
+/** Groups codes by their base SKU (everything after the first "-")
+ *  BOXM-ABUINF-30 → ABUINF-30
+ *  PER-ABUINF-30  → ABUINF-30
+ */
+function baseCode(code: string): string {
+  const idx = code.indexOf('-')
+  return idx >= 0 ? code.slice(idx + 1) : code
+}
+
 function ep() {
   const base = (import.meta as any).env?.VITE_API_BASE || ''
   return String(base || '').replace(/\/$/, '') || '/api/transfers'
@@ -59,11 +68,11 @@ export default function TransferPage() {
   const totalQty    = useMemo(() => lines.reduce((a, b) => a + b.qty, 0), [lines])
   const totalUnits  = useMemo(() => lines.reduce((a, b) => a + b.qty * (b.qtyPerBox ?? 1), 0), [lines])
 
-  // Sum of units per product (grouped by cleaned name, fallback to code)
+  // Sum of units per base SKU (BOXM-ABUINF-30 + PER-ABUINF-30 → ABUINF-30)
   const productTotals = useMemo(() => {
     const m = new Map<string, number>()
     for (const l of lines) {
-      const key = (l.name ? cleanProductName(l.name) : null) || l.code
+      const key = baseCode(l.code)
       m.set(key, (m.get(key) ?? 0) + l.qty * (l.qtyPerBox ?? 1))
     }
     return m
@@ -298,8 +307,7 @@ export default function TransferPage() {
           <tbody>
             {lines.map((l) => {
               const isBox = !!l.qtyPerBox
-              const nameKey = (l.name ? cleanProductName(l.name) : null) || l.code
-              const productTotal = productTotals.get(nameKey) ?? l.qty * (l.qtyPerBox ?? 1)
+              const productTotal = productTotals.get(baseCode(l.code)) ?? l.qty * (l.qtyPerBox ?? 1)
               return (
                 <tr key={l.id} className="odd:bg-white even:bg-slate-50/50">
                   {/* Código + descripción */}
