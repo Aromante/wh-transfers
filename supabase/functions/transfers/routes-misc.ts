@@ -87,7 +87,7 @@ export async function handleGetLogs(req: Request, env: Env) {
     const url = new URL(req.url)
     const transferId = url.searchParams.get('transfer_id')
     if (!transferId) return { error: 'transfer_id requerido', status: 400 }
-    const rows = await sbSelect(env, 'transfer_logs', `transfer_id=eq.${encodeURIComponent(transferId)}&select=*&order=created_at.desc`)
+    const rows = await sbSelect(env, 'transfer_logs', `transfer_id=eq.${encodeURIComponent(transferId)}&select=*&order=ts.asc`)
     return { data: rows }
 }
 

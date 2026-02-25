@@ -260,91 +260,6 @@ async function sbUpsert(env: Env, table: string, rows: any[]) {
   return r.json()
 }
 
-// Upsert directo a forecasting_inventory_today (fallback cuando no existe/falla la RPC)
-async function sbUpsertForecastingToday(env: Env, items: { sku: string, location_id: number, in_transit_units: number }[]) {
-  const clean = items
-    .map(it => ({ sku: String(it.sku || '').trim(), location_id: Number(it.location_id), in_transit_units: Number(it.in_transit_units || 0) }))
-    .filter(it => it.sku.length > 0 && Number.isFinite(it.location_id) && it.location_id > 0)
-  if (!clean.length) return []
-  const results: any[] = []
-  for (const part of chunk(clean, 100)) {
-    const url = `${env.SUPABASE_URL}/rest/v1/forecasting_inventory_today?on_conflict=sku,location_id`
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { ...sbHeaders(env), prefer: 'resolution=merge-duplicates,return=representation' },
-      body: JSON.stringify(part),
-    })
-    if (r.ok) {
-      results.push(await r.json())
-      continue
-    }
-    // Si falla el upsert por falta de índice único, intentar por fila: PATCH (update) y si no afectó filas, POST (insert)
-    const txt = await r.text().catch(() => '')
-    // Intento manual por fila
-    for (const row of part) {
-      const q = new URLSearchParams()
-      q.set('sku', `eq.${row.sku}`)
-      q.set('location_id', `eq.${String(row.location_id)}`)
-      const patchUrl = `${env.SUPABASE_URL}/rest/v1/forecasting_inventory_today?${q.toString()}`
-      const rPatch = await fetch(patchUrl, {
-        method: 'PATCH',
-        headers: { ...sbHeaders(env), prefer: 'return=representation' },
-        body: JSON.stringify({ in_transit_units: row.in_transit_units }),
-      })
-      if (rPatch.ok) {
-        const body = await rPatch.json().catch(() => [])
-        if (Array.isArray(body) && body.length > 0) { results.push(body); continue }
-      }
-      // Insert si no existía
-      const rPost = await fetch(`${env.SUPABASE_URL}/rest/v1/forecasting_inventory_today`, {
-        method: 'POST',
-        headers: { ...sbHeaders(env), prefer: 'return=representation' },
-        body: JSON.stringify([row]),
-      })
-      if (!rPost.ok) {
-        const errTxt = await rPost.text().catch(() => '')
-        throw new Error(`forecasting upsert fallback failed: ${txt} ; row=${JSON.stringify(row)} ; post=${errTxt}`)
-      }
-      results.push(await rPost.json())
-    }
-  }
-  return results.flat()
-}
-
-// Versión estricta: actualiza por fila con PATCH y si no existe inserta con POST. Evita upsert en bloque.
-async function sbUpsertForecastingTodayStrict(env: Env, items: { sku: string, location_id: number, in_transit_units: number }[]) {
-  const clean = items
-    .map(it => ({ sku: String(it.sku || '').trim(), location_id: Number(it.location_id), in_transit_units: Number(it.in_transit_units || 0) }))
-    .filter(it => it.sku.length > 0 && Number.isFinite(it.location_id) && it.location_id > 0)
-  const results: any[] = []
-  for (const row of clean) {
-    const q = new URLSearchParams()
-    q.set('sku', `eq.${row.sku}`)
-    q.set('location_id', `eq.${String(row.location_id)}`)
-    const patchUrl = `${env.SUPABASE_URL}/rest/v1/forecasting_inventory_today?${q.toString()}`
-    const rPatch = await fetch(patchUrl, {
-      method: 'PATCH',
-      headers: { ...sbHeaders(env), prefer: 'return=representation' },
-      body: JSON.stringify({ in_transit_units: row.in_transit_units }),
-    })
-    if (rPatch.ok) {
-      const body = await rPatch.json().catch(() => [])
-      if (Array.isArray(body) && body.length > 0) { results.push(body); continue }
-    }
-    const rPost = await fetch(`${env.SUPABASE_URL}/rest/v1/forecasting_inventory_today`, {
-      method: 'POST',
-      headers: { ...sbHeaders(env), prefer: 'return=representation' },
-      body: JSON.stringify([row]),
-    })
-    if (!rPost.ok) {
-      const errTxt = await rPost.text().catch(() => '')
-      throw new Error(`forecasting strict upsert failed: row=${JSON.stringify(row)} ; post=${errTxt}`)
-    }
-    results.push(await rPost.json())
-  }
-  return results.flat()
-}
-
 async function sbGetByClientId(env: Env, clientId: string) {
   const r = await fetch(`${env.SUPABASE_URL}/rest/v1/transfers?client_transfer_id=eq.${encodeURIComponent(clientId)}&select=id,odoo_picking_id,picking_name,status`, {
     method: 'GET', headers: sbHeaders(env)
@@ -831,47 +746,6 @@ async function createTransfer(req: Request, env: Env) {
       await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'shopify_draft_error', detail: { error: String((e as any)?.message || e) } }])
     }
 
-    // (Shopify draft ya se creó antes; aquí solo registramos en Supabase)
-
-    // Forecasting: registrar mercancía en tránsito para WH -> KRONI (SET directo vía RPC batch)
-    try {
-      if (pickingState === 'done' && origin_id === 'WH/Existencias' && dest_id === 'KRONI/Existencias') {
-        // Idempotencia: evitar aplicar dos veces
-        const rLog = await fetch(`${env.SUPABASE_URL}/rest/v1/transfer_logs?transfer_id=eq.${encodeURIComponent(transferId)}&event=eq.forecast_in_transit_applied&select=id`, { method: 'GET', headers: sbHeaders(env) })
-        if (!rLog.ok) throw new Error(await rLog.text())
-        const existed = await rLog.json()
-        if (!Array.isArray(existed) || existed.length === 0) {
-          // Forzar ubicación KRONI por requerimiento operativo: 98632499512
-          // (Ignora mapeos y env para evitar discrepancias observadas)
-          const destLocNumeric = 98632499512
-          await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'forecast_target_location', detail: { chosen_location_id: destLocNumeric, reason: 'hardcoded_for_KRONI' } }])
-          // Resolver SKUs en batch para minimizar subrequests y construir payload para RPC
-          const codesForSku = (lines as any[]).map(ln => normCode(String(ln.barcode || ln.sku || ''))).filter(Boolean)
-          let variantsMapForSku: Map<string, any> | null = null
-          try { variantsMapForSku = await resolveVariantsBatch(env, codesForSku) } catch { variantsMapForSku = null }
-          const items: any[] = []
-          for (const ln of (lines as any[])) {
-            const code = normCode(String(ln.barcode || ln.sku || ''))
-            const qty = Number(ln.qty || 0)
-            if (!code || qty <= 0) continue
-            // Resolver SKU preferentemente desde Shopify; fallback al código ingresado
-            let sku: string | null = null
-            try {
-              const variant = variantsMapForSku?.get(code)
-              sku = (variant?.sku && String(variant.sku).trim()) || null
-            } catch {}
-            if (!sku) sku = code
-            items.push({ sku, location_id: destLocNumeric, in_transit_units: qty })
-          }
-          // Para KRONI, forzamos REST upsert para evitar discrepancias en la RPC del lado de Supabase
-          const up = await sbUpsertForecastingTodayStrict(env, items)
-          await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'forecast_in_transit_applied', detail: { via: 'rest_forced_strict', updates: items, result_count: Array.isArray(up) ? up.length : null } }])
-        }
-      }
-    } catch (e) {
-      await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event: 'forecast_in_transit_error', detail: { error: String((e as any)?.message || e) } }])
-    }
-
     // Response: include shopify draft info for UI
     const resp: any = { ok: true, id: transferId, odoo_picking_id: String(pickingId), picking_name: pickingName, status: pickingState === 'done' ? 'validated' : 'odoo_created' }
     try {
@@ -1145,24 +1019,6 @@ async function draftValidate(_req: Request, env: Env, id: string) {
     const pickingState = pickRow?.[0]?.state || 'unknown'
     await sbUpdateTransfer(env, id, { status: pickingState === 'done' ? 'validated' : 'odoo_created', odoo_picking_id: String(pickingId), picking_name: pickingName })
     await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'odoo_created', detail: { pickingId, pickingName, state: pickingState } }])
-    // KRONI forecasting strict update (same logic as createTransfer)
-    try {
-      if (pickingState === 'done' && origin_id === 'WH/Existencias' && dest_id === 'KRONI/Existencias') {
-        const rLog = await fetch(`${env.SUPABASE_URL}/rest/v1/transfer_logs?transfer_id=eq.${encodeURIComponent(id)}&event=eq.forecast_in_transit_applied&select=id`, { method: 'GET', headers: sbHeaders(env) })
-        if (rLog.ok) {
-          const existed = await rLog.json()
-          if (!Array.isArray(existed) || existed.length === 0) {
-            const destLocNumeric = 98632499512
-            await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'forecast_target_location', detail: { chosen_location_id: destLocNumeric, reason: 'hardcoded_for_KRONI' } }])
-            const items = lines.map((ln: any) => ({ sku: (String(ln.sku || ln.barcode || '') || '').trim() || String(ln.barcode || ''), location_id: destLocNumeric, in_transit_units: Number(ln.qty || 0) }))
-            const up = await sbUpsertForecastingTodayStrict(env, items)
-            await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'forecast_in_transit_applied', detail: { via: 'rest_forced_strict', updates: items, result_count: Array.isArray(up) ? up.length : null } }])
-          }
-        }
-      }
-    } catch (e) {
-      await sbInsert(env, 'transfer_logs', [{ transfer_id: id, event: 'forecast_in_transit_error', detail: { error: String((e as any)?.message || e) } }])
-    }
     return json({ ok: true, id, picking_name: pickingName, odoo_picking_id: String(pickingId), status: pickingState === 'done' ? 'validated' : 'odoo_created' }, { headers: cors })
   } catch (e: any) { return json({ ok: false, error: String(e?.message || e) }, { status: 500, headers: cors }) }
 }

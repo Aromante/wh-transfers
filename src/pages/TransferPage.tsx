@@ -40,6 +40,7 @@ export default function TransferPage() {
   const [confirming, setConfirming] = useState(false)
   const [scanError, setScanError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
+  const [bulkPasting, setBulkPasting] = useState(false)
 
   // Single input: scanner + manual entry + autocomplete
   const [manualInput, setManualInput] = useState<string>('')
@@ -154,6 +155,55 @@ export default function TransferPage() {
     if (e.key === 'Escape') { setShowSuggestions(false); setSuggestions([]) }
   }
 
+  // ── Multi-line paste: split by newlines and resolve each code ────────────
+  const onManualPaste = async (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData('text')
+    const codes = text.split('\n').map(l => l.trim()).filter(Boolean)
+    if (codes.length <= 1) return // single line → let browser paste normally
+
+    e.preventDefault()
+    setManualInput('')
+    setSuggestions([])
+    setShowSuggestions(false)
+    setScanError(null)
+    setBulkPasting(true)
+
+    const uniqueCodes = [...new Set(codes)]
+
+    // Codes already in the table → just increment qty
+    const existingCodes = uniqueCodes.filter(code => lines.some(l => l.code === code))
+    const newCodes      = uniqueCodes.filter(code => !lines.some(l => l.code === code))
+
+    if (existingCodes.length) {
+      setLines(prev => prev.map(l => existingCodes.includes(l.code) ? { ...l, qty: l.qty + 1 } : l))
+    }
+
+    // Resolve new codes in parallel
+    const results = await Promise.allSettled(
+      newCodes.map(async code => {
+        const r = await fetch(`${ep()}/resolve?code=${encodeURIComponent(code)}`, {
+          headers: { 'X-User-Id': getUserId() },
+        })
+        if (!r.ok) throw new Error(code)
+        const data = await r.json()
+        const d = data?.data || data
+        return { id: genId(), code, qty: 1, name: d?.name ?? null, qtyPerBox: d?.qty_per_box ?? null } as Line
+      })
+    )
+
+    const newLines = results
+      .filter(r => r.status === 'fulfilled')
+      .map(r => (r as PromiseFulfilledResult<Line>).value)
+    const failed = results
+      .filter(r => r.status === 'rejected')
+      .map(r => (r as PromiseRejectedResult).reason?.message || '?')
+
+    if (newLines.length) setLines(prev => [...prev, ...newLines])
+    if (failed.length) setScanError(`No encontrados: ${failed.join(', ')}`)
+
+    setBulkPasting(false)
+  }
+
   const selectSuggestion = (s: { code: string; name: string; qty_per_box: number | null }) => {
     setShowSuggestions(false)
     setSuggestions([])
@@ -253,7 +303,8 @@ export default function TransferPage() {
             onKeyDown={onManualKeyDown}
             onFocus={() => manualInput.trim().length >= 2 && setShowSuggestions(true)}
             onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
-            placeholder="Escanea o escribe un código de producto y presiona Enter…"
+            onPaste={onManualPaste}
+            placeholder="Escanea, escribe o pega una lista de códigos…"
             className="w-full rounded-md border border-slate-200 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-slate-300"
           />
           {showSuggestions && (suggestLoading || suggestions.length > 0) && (
@@ -284,7 +335,11 @@ export default function TransferPage() {
           )}
         </div>
 
-        {resolving && <div className="mt-1 text-xs text-slate-500">Validando código…</div>}
+        {(resolving || bulkPasting) && (
+          <div className="mt-1 text-xs text-slate-500">
+            {bulkPasting ? 'Procesando lista…' : 'Validando código…'}
+          </div>
+        )}
         {scanError && !resolving && (
           <div className="mt-1 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
             <span className="flex-1">{scanError}</span>

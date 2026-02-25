@@ -139,9 +139,11 @@ export async function syncShopifyTransfer(
     })()
 
     // ── Step 1: Create the transfer (status = DRAFT) ──────────────────────────
+    // @idempotent goes on the FIELD (not the mutation declaration), requires key arg
+    const idempotencyKey = crypto.randomUUID()
     const createMutation = `
         mutation inventoryTransferCreate($input: InventoryTransferCreateInput!) {
-            inventoryTransferCreate(input: $input) {
+            inventoryTransferCreate(input: $input) @idempotent(key: "${idempotencyKey}") {
                 inventoryTransfer {
                     id
                     status
@@ -167,18 +169,24 @@ export async function syncShopifyTransfer(
         const errs = createResult.raw?.data?.inventoryTransferCreate?.userErrors
             || createResult.raw?.errors
             || createResult.raw
+        await logFn?.('shopify_transfer_create_error', { errs: JSON.stringify(errs).slice(0, 800), originOdooCode, destOdooCode })
         throw new Error(`inventoryTransferCreate failed: ${JSON.stringify(errs)}`)
     }
 
     const transferGid: string = createResult.raw?.data?.inventoryTransferCreate?.inventoryTransfer?.id
-    if (!transferGid) throw new Error('inventoryTransferCreate devolvió id vacío')
+    if (!transferGid) {
+        const userErrs = createResult.raw?.data?.inventoryTransferCreate?.userErrors
+        await logFn?.('shopify_transfer_create_error', { error: 'empty_transfer_id', userErrors: JSON.stringify(userErrs).slice(0, 800), originOdooCode, destOdooCode })
+        throw new Error('inventoryTransferCreate devolvió id vacío')
+    }
 
     await logFn?.('shopify_transfer_created', { transferGid, lineItems: lineItems.length })
 
     // ── Step 2: Mark as ready to ship ────────────────────────────────────────
+    const readyKey = crypto.randomUUID()
     const readyMutation = `
         mutation inventoryTransferMarkAsReadyToShip($id: ID!) {
-            inventoryTransferMarkAsReadyToShip(id: $id) {
+            inventoryTransferMarkAsReadyToShip(id: $id) @idempotent(key: "${readyKey}") {
                 inventoryTransfer { id status }
                 userErrors { field message }
             }
@@ -194,9 +202,10 @@ export async function syncShopifyTransfer(
     // ── Step 3: Create shipment (in-transit) ─────────────────────────────────
     // inventoryShipmentCreate uses movementId (the transfer GID) + lineItems
     // We also fetch lineItems.edges.node.id so we can use shipmentLineItemId in Step 4
+    const shipmentKey = crypto.randomUUID()
     const shipmentMutation = `
         mutation inventoryShipmentCreate($input: InventoryShipmentCreateInput!) {
-            inventoryShipmentCreate(input: $input) {
+            inventoryShipmentCreate(input: $input) @idempotent(key: "${shipmentKey}") {
                 inventoryShipment {
                     id
                     lineItems(first: 250) {
@@ -236,12 +245,22 @@ export async function syncShopifyTransfer(
     // ── Step 3.5: Mark shipment as IN_TRANSIT ─────────────────────────────────
     // inventoryShipmentCreate always creates in DRAFT status.
     // Must call inventoryShipmentMarkInTransit before receiving.
-    const markInTransitMutation = `mutation { inventoryShipmentMarkInTransit(id: "${shipmentGid}") { inventoryShipment { id status } userErrors { field message } } }`
+    const inTransitKey = crypto.randomUUID()
+    const markInTransitMutation = `mutation { inventoryShipmentMarkInTransit(id: "${shipmentGid}") @idempotent(key: "${inTransitKey}") { inventoryShipment { id status } userErrors { field message } } }`
     const inTransitResult = await shopifyGraphQLWithVersion(env, apiVersion, markInTransitMutation)
-    if (!inTransitResult.ok) {
-        const errs = inTransitResult.raw?.data?.inventoryShipmentMarkInTransit?.userErrors || inTransitResult.raw?.errors
+    const inTransitUserErrs = inTransitResult.raw?.data?.inventoryShipmentMarkInTransit?.userErrors
+    if (!inTransitResult.ok || inTransitUserErrs?.length) {
+        // userErrors are inside data.data — ok=true doesn't mean the mutation succeeded
+        const errs = inTransitUserErrs?.length ? inTransitUserErrs : inTransitResult.raw?.errors
         await logFn?.('shopify_shipment_in_transit_error', { shipmentGid, error: JSON.stringify(errs) })
-        // Continue anyway — attempt receive regardless
+        // A DRAFT shipment cannot be received — abort here instead of failing on receive
+        await logFn?.('shopify_sync_done', {
+            originOdooCode, destOdooCode, transferGid, shipmentGid,
+            finalStatus: 'ready_to_ship',
+            synced: lineItems.length,
+            skipped: inventoryItemQtyMap.size - lineItems.length,
+        })
+        return { synced: lineItems.length, skipped: inventoryItemQtyMap.size - lineItems.length }
     } else {
         await logFn?.('shopify_shipment_in_transit', { shipmentGid, status: inTransitResult.raw?.data?.inventoryShipmentMarkInTransit?.inventoryShipment?.status })
     }
@@ -251,16 +270,17 @@ export async function syncShopifyTransfer(
     // enum serialization issues. Variables send strings; inline sends unquoted enum values.
     let receiveResult: any
 
+    const receiveKey = crypto.randomUUID()
     if (shipmentLineItemEdges.length > 0) {
         // Build inline mutation with enum literal ACCEPTED (no quotes around enum value)
         const lineItemsGql = shipmentLineItemEdges
             .map((e: any) => `{ shipmentLineItemId: "${e.node.id}", quantity: ${e.node.quantity}, reason: ACCEPTED }`)
             .join(', ')
-        const receiveMutation = `mutation { inventoryShipmentReceive(id: "${shipmentGid}", lineItems: [${lineItemsGql}]) { inventoryShipment { id status } userErrors { field message } } }`
+        const receiveMutation = `mutation { inventoryShipmentReceive(id: "${shipmentGid}", lineItems: [${lineItemsGql}]) @idempotent(key: "${receiveKey}") { inventoryShipment { id status } userErrors { field message } } }`
         receiveResult = await shopifyGraphQLWithVersion(env, apiVersion, receiveMutation)
     } else {
         // Fallback: bulk accept all items if line item IDs unavailable
-        const receiveMutation = `mutation { inventoryShipmentReceive(id: "${shipmentGid}", bulkReceiveAction: ACCEPTED) { inventoryShipment { id status } userErrors { field message } } }`
+        const receiveMutation = `mutation { inventoryShipmentReceive(id: "${shipmentGid}", bulkReceiveAction: ACCEPTED) @idempotent(key: "${receiveKey}") { inventoryShipment { id status } userErrors { field message } } }`
         receiveResult = await shopifyGraphQLWithVersion(env, apiVersion, receiveMutation)
     }
 

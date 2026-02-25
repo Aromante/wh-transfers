@@ -311,7 +311,10 @@ export async function handleReceiveTransfer(req: Request, env: Env) {
                                 .catch(e => console.error('Persist shopify_transfer_id failed:', e?.message || e))
                         }
                     },
-                ).catch(e => console.error('Shopify sync failed:', e?.message || e))
+                ).catch(e => {
+                    console.error('Shopify sync failed:', e?.message || e)
+                    sbLogTransfer(env, transfer_id, 'shopify_sync_failed', { error: e?.message || String(e) }).catch(() => {})
+                })
             }
         }
     } catch (e: any) {
