@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { getUserId } from '../lib/user'
 import useLocations from '../hooks/useLocations'
+import LocationSelect, { LocationLabel, locMeta } from '../components/LocationSelect'
 
 function ep() {
   const base = (import.meta as any).env?.VITE_API_BASE || ''
@@ -237,25 +238,21 @@ export default function HistoryPage() {
           </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">Origen</label>
-            <select
+            <LocationSelect
               value={origin}
-              onChange={e => { setPage(1); setOrigin(e.target.value) }}
-              className="w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
-            >
-              <option value="">Todos</option>
-              {(locations || []).map(l => <option key={l.code} value={l.code}>{l.code}</option>)}
-            </select>
+              options={locations || []}
+              onChange={v => { setPage(1); setOrigin(v) }}
+              allLabel="Todos"
+            />
           </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">Destino</label>
-            <select
+            <LocationSelect
               value={dest}
-              onChange={e => { setPage(1); setDest(e.target.value) }}
-              className="w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
-            >
-              <option value="">Todos</option>
-              {(locations || []).map(l => <option key={l.code} value={l.code}>{l.code}</option>)}
-            </select>
+              options={locations || []}
+              onChange={v => { setPage(1); setDest(v) }}
+              allLabel="Todos"
+            />
           </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">Desde</label>
@@ -370,16 +367,12 @@ export default function HistoryPage() {
 
                       {/* Origin */}
                       <td className="px-3 py-2.5 hidden sm:table-cell">
-                        <span className="text-xs rounded bg-slate-100 px-1.5 py-0.5 text-slate-700 font-medium">
-                          {row.origin_name || row.origin_id}
-                        </span>
+                        <LocationLabel code={row.origin_id} />
                       </td>
 
                       {/* Dest */}
                       <td className="px-3 py-2.5 hidden sm:table-cell">
-                        <span className="text-xs rounded bg-slate-100 px-1.5 py-0.5 text-slate-700 font-medium">
-                          {row.dest_name || row.dest_id}
-                        </span>
+                        <LocationLabel code={row.dest_id} />
                       </td>
 
                       {/* Status */}
@@ -428,7 +421,7 @@ export default function HistoryPage() {
                               )}
                               {/* Mobile: show origin/dest here */}
                               <span className="sm:hidden inline-flex items-center gap-1 rounded-full bg-white border border-slate-200 px-2.5 py-0.5 text-xs text-slate-600 font-medium">
-                                {row.origin_id} → {row.dest_id}
+                                {locMeta(row.origin_id).label} → {locMeta(row.dest_id).label}
                               </span>
                             </div>
                           )}

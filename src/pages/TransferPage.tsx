@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import useLocations from '../hooks/useLocations'
+import LocationSelect from '../components/LocationSelect'
 import { genId } from '../lib/uuid'
 import { getUserId } from '../lib/user'
 
@@ -182,34 +183,25 @@ export default function TransferPage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <label className="block">
           <div className="text-xs text-slate-500 mb-1">Origen</div>
-          <select
-            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-300"
+          <LocationSelect
             value={origin}
-            onChange={(e) => {
-              const next = e.target.value
+            options={(locations || []).filter(l => l.can_be_origin)}
+            onChange={(next) => {
               setOrigin(next)
               if (dest === next) {
                 const alt = (locations || []).find(l => l.can_be_destination && l.code !== next)?.code
                 if (alt) setDest(alt)
               }
             }}
-          >
-            {(locations || []).filter(l => l.can_be_origin).map((loc) => (
-              <option key={loc.code} value={loc.code}>{loc.code} — {loc.name}</option>
-            ))}
-          </select>
+          />
         </label>
         <label className="block">
           <div className="text-xs text-slate-500 mb-1">Destino</div>
-          <select
-            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-300"
+          <LocationSelect
             value={dest}
-            onChange={(e) => setDest(e.target.value)}
-          >
-            {(locations || []).filter(l => l.can_be_destination && l.code !== origin).map((loc) => (
-              <option key={loc.code} value={loc.code}>{loc.code} — {loc.name}</option>
-            ))}
-          </select>
+            options={(locations || []).filter(l => l.can_be_destination && l.code !== origin)}
+            onChange={setDest}
+          />
         </label>
       </div>
 
