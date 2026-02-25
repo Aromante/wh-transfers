@@ -1,38 +1,40 @@
-import React, { useEffect, useMemo, useState } from 'react'
-import ScannerInput from '../components/ScannerInput'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import useLocations from '../hooks/useLocations'
 import { genId } from '../lib/uuid'
-import { isMultiDraftsEnabled } from '../lib/flags'
-import useDrafts from '../hooks/useDrafts'
 import { getUserId } from '../lib/user'
 
 type Line = { id: string; code: string; qty: number }
 
-// Returns the EF base URL as-is (VITE_API_BASE already points to the EF endpoint)
 function ep() {
   const base = (import.meta as any).env?.VITE_API_BASE || ''
   return String(base || '').replace(/\/$/, '') || '/api/transfers'
 }
-// Keep legacy alias used below
-const endpointTransfers = ep
 
 export default function TransferPage() {
   const { locations, loading } = useLocations()
-  const draftsFlag = isMultiDraftsEnabled()
-  const { drafts, refresh: refreshDrafts } = useDrafts()
   const [origin, setOrigin] = useState<string>('')
   const [dest, setDest] = useState<string>('')
   const [lines, setLines] = useState<Line[]>([])
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<any>(null)
-  const [showDrafts, setShowDrafts] = useState(false)
   const [confirming, setConfirming] = useState(false)
-  const [cancelingDraftId, setCancelingDraftId] = useState<string | null>(null)
   const [scanError, setScanError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
-  const [autoFocus, setAutoFocus] = useState<boolean>(() => {
-    try { return localStorage.getItem('wh_auto_focus') !== '0' } catch { return true }
-  })
+
+  // Single input: scanner + manual entry + autocomplete
+  const [manualInput, setManualInput] = useState<string>('')
+  const [suggestions, setSuggestions] = useState<Array<{ code: string; name: string; qty_per_box: number | null }>>([])
+  const [suggestLoading, setSuggestLoading] = useState(false)
+  const suggestTimeoutRef = useRef<any>(null)
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  // Auto-focus — keeps focus on the input so a scanner can send codes at any time
+  useEffect(() => {
+    inputRef.current?.focus()
+    const id = setInterval(() => inputRef.current?.focus(), 6000)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
     if (locations.length) {
@@ -45,7 +47,6 @@ export default function TransferPage() {
 
   const totalQty = useMemo(() => lines.reduce((a, b) => a + b.qty, 0), [lines])
 
-  // Mapear insuficiencias por código para marcar en la tabla
   const insuffByCode = useMemo(() => {
     const m = new Map<string, { available: number; requested: number }>()
     if (result && result.kind === 'insufficient' && Array.isArray(result.insufficient)) {
@@ -56,33 +57,70 @@ export default function TransferPage() {
     return m
   }, [result])
 
+  // ── Scanner / barcode scan ────────────────────────────────────────────────
   const onScan = async (code: string) => {
     setScanError(null)
-    // If already in the list, just increment — no need to re-validate
     const existing = lines.find(l => l.code === code)
     if (existing) {
       setLines(prev => prev.map(l => l.id === existing.id ? { ...l, qty: l.qty + 1 } : l))
       return
     }
-    // Validate against EF before adding
     setResolving(true)
     try {
       const r = await fetch(`${ep()}/resolve?code=${encodeURIComponent(code)}`, {
         headers: { 'X-User-Id': getUserId() },
       })
-      const data = await r.json()
       if (!r.ok) {
         setScanError(`"${code}" no encontrado en el catálogo. Verifica el código e intenta de nuevo.`)
         return
       }
-      // Always 1 — means "1 box" or "1 unit". The EF multiplies by qty_per_box internally.
-      const qty = 1
-      setLines(prev => [...prev, { id: genId(), code, qty }])
+      setLines(prev => [...prev, { id: genId(), code, qty: 1 }])
     } catch (e: any) {
       setScanError(`Error validando "${code}": ${String(e?.message || e)}`)
     } finally {
       setResolving(false)
     }
+  }
+
+  // ── Manual text input with debounced suggest ──────────────────────────────
+  const onManualChange = (val: string) => {
+    setManualInput(val)
+    setShowSuggestions(true)
+    if (suggestTimeoutRef.current) clearTimeout(suggestTimeoutRef.current)
+    if (val.trim().length < 2) { setSuggestions([]); return }
+    suggestTimeoutRef.current = setTimeout(async () => {
+      setSuggestLoading(true)
+      try {
+        const r = await fetch(`${ep()}/resolve?code=${encodeURIComponent(val.trim())}`, {
+          headers: { 'X-User-Id': getUserId() },
+        })
+        const data = await r.json()
+        if (r.ok && data?.data) {
+          setSuggestions([{ code: data.data.sku || data.data.barcode, name: data.data.name, qty_per_box: data.data.qty_per_box }])
+        } else {
+          setSuggestions([])
+        }
+      } catch { setSuggestions([]) }
+      finally { setSuggestLoading(false) }
+    }, 350)
+  }
+
+  const onManualKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && manualInput.trim()) {
+      e.preventDefault()
+      onScan(manualInput.trim())
+      setManualInput('')
+      setSuggestions([])
+      setShowSuggestions(false)
+    }
+    if (e.key === 'Escape') { setShowSuggestions(false); setSuggestions([]) }
+  }
+
+  const selectSuggestion = (code: string) => {
+    setShowSuggestions(false)
+    setSuggestions([])
+    setManualInput('')
+    onScan(code)
   }
 
   const removeLine = (id: string) => setLines((prev) => prev.filter((l) => l.id !== id))
@@ -94,13 +132,12 @@ export default function TransferPage() {
     setBusy(true)
     setResult(null)
     try {
-      const o = origin.trim()
-      const d = dest.trim()
+      // Frontend generates transfer_id for idempotency — duplicate submits are safe
       const body = {
-        client_transfer_id: genId(),
-        origin_id: o,
-        dest_id: d,
-        lines: lines.map((l) => ({ barcode: l.code, qty: l.qty })),
+        transfer_id: genId(),
+        origin_id: origin.trim(),
+        dest_id: dest.trim(),
+        lines: lines.map((l) => ({ sku: l.code, qty: l.qty })),
       }
       const r = await fetch(ep(), {
         method: 'POST',
@@ -109,14 +146,12 @@ export default function TransferPage() {
       })
       const data = await r.json()
       if (r.ok) {
-        // EF returns { data: { transfer: { id, status: 'pending' }, message } }
         const t = (data as any)?.data?.transfer || (data as any)?.transfer || data
         const message = (data as any)?.data?.message || null
-        setResult({ ok: true, kind: 'success', id: t?.id, status: t?.status, message })
+        setResult({ ok: true, kind: 'success', id: t?.transfer_id || t?.id, status: t?.status, message })
         setLines([])
         setConfirming(false)
       } else {
-        // Unwrap EF error response — stock check returns { kind:'insufficient', origin, insufficient:[...] }
         const inner = (data as any)?.data || data
         if (inner?.kind === 'insufficient') {
           setResult({ ok: false, kind: 'insufficient', origin: inner.origin, insufficient: inner.insufficient })
@@ -135,114 +170,15 @@ export default function TransferPage() {
     await submit()
   }
 
-  const saveAsDraft = async () => {
-    if (!draftsFlag) return
-    if (!origin || !dest || !lines.length) return
-    setBusy(true)
-    try {
-      const body = {
-        origin_id: origin,
-        dest_id: dest,
-        title: null,
-        lines: lines.map(l => ({ barcode: l.code, qty: l.qty }))
-      }
-      const r = await fetch(`${ep()}/drafts`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() }, body: JSON.stringify(body) })
-      const data = await r.json()
-      if (!r.ok) {
-        alert(`No se pudo guardar el borrador: ${data?.error || r.status}`)
-        return
-      }
-      setLines([])
-      const saved = data?.data || data
-      setResult({ ok: true, kind: 'draft_saved', id: saved?.id })
-      refreshDrafts()
-    } catch (e: any) {
-      alert(`Error guardando borrador: ${String(e?.message || e)}`)
-    } finally { setBusy(false) }
-  }
-
-  const resumeDraft = async (id: string) => {
-    try {
-      // GET /transfer?id=... returns transfer + embedded lines
-      const r = await fetch(`${ep()}/transfer?id=${encodeURIComponent(id)}`, { headers: { 'X-User-Id': getUserId() } })
-      const json = await r.json()
-      const meta = json?.data || json
-      if (meta?.origin_id) setOrigin(meta.origin_id)
-      if (meta?.dest_id) setDest(meta.dest_id)
-      const linesData: any[] = Array.isArray(meta?.lines) ? meta.lines : []
-      const next: Line[] = linesData
-        .map((ln: any) => ({ id: genId(), code: String(ln.barcode || ln.sku || ''), qty: Number(ln.qty || 0) }))
-        .filter(l => l.code && l.qty > 0)
-      setLines(next)
-      setShowDrafts(false)
-      setResult(null)
-    } catch {}
-  }
-
-  const validateDraft = async (id: string) => {
-    if (busy) return
-    setBusy(true)
-    try {
-      // EF: POST /validate with { transfer_id }
-      const r = await fetch(`${ep()}/validate`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
-        body: JSON.stringify({ transfer_id: id }),
-      })
-      const data = await r.json()
-      if (r.ok) {
-        const validated = data?.data || data
-        setResult({ ok: true, kind: 'success', id, validated: validated?.validated })
-        refreshDrafts()
-      } else {
-        setResult({ ok: false, data })
-      }
-    } catch (e: any) {
-      setResult({ ok: false, error: String(e?.message || e) })
-    } finally { setBusy(false) }
-  }
-
-  const cancelDraft = async (id: string) => {
-    if (busy) return
-    setCancelingDraftId(null)
-    setBusy(true)
-    try {
-      // Soft-cancel: PATCH /drafts?id=<id> with { status: 'cancelled' }
-      const r = await fetch(`${ep()}/drafts?id=${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
-        body: JSON.stringify({ status: 'cancelled' }),
-      })
-      const data = await r.json().catch(() => null)
-      if (!r.ok) alert(`No se pudo cancelar: ${data?.error || r.status}`)
-      await refreshDrafts()
-    } catch (e: any) {
-      alert(`Error al cancelar: ${String(e?.message || e)}`)
-    } finally { setBusy(false) }
-  }
-
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
       <div className="mb-6">
         <div className="font-suisseMono text-xs text-slate-500">OPERACIONES</div>
         <h1 className="mt-1 text-3xl font-semibold tracking-tight">Nueva transferencia</h1>
-        <div className="mt-2 flex items-center justify-between gap-4">
-          <p className="text-slate-600">Escanea productos y confirma el envío. El receptor lo recibirá en la pestaña Recepción.</p>
-          <label className="flex items-center gap-2 text-sm select-none">
-            <input
-              type="checkbox"
-              checked={autoFocus}
-              onChange={(e) => {
-                const val = e.target.checked
-                setAutoFocus(val)
-                try { localStorage.setItem('wh_auto_focus', val ? '1' : '0') } catch {}
-              }}
-            />
-            <span>Auto‑enfoque del escáner</span>
-          </label>
-        </div>
+        <p className="mt-2 text-slate-600">Escanea productos y confirma el envío. El receptor lo verá en la pestaña Recepción.</p>
       </div>
 
+      {/* Origen / Destino */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <label className="block">
           <div className="text-xs text-slate-500 mb-1">Origen</div>
@@ -277,19 +213,58 @@ export default function TransferPage() {
         </label>
       </div>
 
+      {/* Scanner / entrada manual — un solo campo */}
       <div className="mt-4">
-        <ScannerInput onScan={onScan} autoFocusEnabled={autoFocus} />
-        {resolving && (
-          <div className="mt-2 text-xs text-slate-500">Validando código…</div>
-        )}
+        <div className="relative">
+          <input
+            ref={inputRef}
+            type="text"
+            value={manualInput}
+            onChange={e => onManualChange(e.target.value)}
+            onKeyDown={onManualKeyDown}
+            onFocus={() => manualInput.trim().length >= 2 && setShowSuggestions(true)}
+            onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+            placeholder="Escanea o escribe un código de producto y presiona Enter…"
+            className="w-full rounded-md border border-slate-200 bg-white px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-slate-300"
+          />
+          {showSuggestions && (suggestLoading || suggestions.length > 0) && (
+            <div className="absolute z-10 mt-1 w-full rounded-md border border-slate-200 bg-white shadow-lg">
+              {suggestLoading && (
+                <div className="px-3 py-2 text-xs text-slate-400">Buscando…</div>
+              )}
+              {!suggestLoading && suggestions.map(s => (
+                <button
+                  key={s.code}
+                  type="button"
+                  onMouseDown={() => selectSuggestion(s.code)}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center justify-between gap-2"
+                >
+                  <span>
+                    <span className="font-mono text-xs text-slate-500 mr-2">{s.code}</span>
+                    <span className="text-slate-800">{s.name}</span>
+                  </span>
+                  {s.qty_per_box && (
+                    <span className="text-xs text-slate-400 shrink-0">{s.qty_per_box} pzs/caja</span>
+                  )}
+                </button>
+              ))}
+              {!suggestLoading && suggestions.length === 0 && manualInput.trim().length >= 2 && (
+                <div className="px-3 py-2 text-xs text-slate-400">Sin coincidencias</div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {resolving && <div className="mt-1 text-xs text-slate-500">Validando código…</div>}
         {scanError && !resolving && (
-          <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+          <div className="mt-1 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
             <span className="flex-1">{scanError}</span>
             <button onClick={() => setScanError(null)} className="shrink-0 font-bold hover:text-red-900">✕</button>
           </div>
         )}
       </div>
 
+      {/* Tabla de líneas */}
       <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white">
         <table className="w-full text-sm">
           <thead>
@@ -305,7 +280,7 @@ export default function TransferPage() {
                 <td className="px-3 py-2 border-b border-slate-100 font-mono text-xs">{l.code}</td>
                 <td className="px-3 py-2 border-b border-slate-100">
                   <div className="inline-flex items-center gap-2">
-                    <button type="button" aria-label="Menos" onClick={() => incQty(l.id, -1)} className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">-</button>
+                    <button type="button" onClick={() => incQty(l.id, -1)} className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">-</button>
                     <input
                       type="number"
                       min={1}
@@ -313,7 +288,7 @@ export default function TransferPage() {
                       onChange={(e) => setQty(l.id, Number(e.target.value))}
                       className="w-20 rounded-md border border-slate-300 px-2 py-1 text-sm"
                     />
-                    <button type="button" aria-label="Más" onClick={() => incQty(l.id, +1)} className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">+</button>
+                    <button type="button" onClick={() => incQty(l.id, +1)} className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">+</button>
                   </div>
                   {insuffByCode.has(l.code) && (
                     <div className="mt-1 text-xs text-red-600">Disponible: {insuffByCode.get(l.code)!.available} en "{origin}"</div>
@@ -333,32 +308,21 @@ export default function TransferPage() {
         </table>
       </div>
 
+      {/* Acciones */}
       <div className="mt-3 flex items-center gap-3 flex-wrap">
         <div className="text-slate-600">Items: {lines.length} • Total unidades: {totalQty}</div>
         {!confirming && (
-          <>
-            <button
-              disabled={!lines.length || busy || loading || !origin || !dest}
-              onClick={() => setConfirming(true)}
-              className="inline-flex items-center rounded-md bg-black text-white px-3 py-2 text-sm disabled:opacity-50"
-            >
-              Enviar transferencia
-            </button>
-            {draftsFlag && (
-              <>
-                <button disabled={!lines.length || busy || loading || !origin || !dest} onClick={saveAsDraft} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50">
-                  Guardar como borrador
-                </button>
-                <button type="button" onClick={() => setShowDrafts(v => !v)} className="ml-auto inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50">
-                  {showDrafts ? 'Ocultar borradores' : 'Mis borradores'}
-                </button>
-              </>
-            )}
-          </>
+          <button
+            disabled={!lines.length || busy || loading || !origin || !dest}
+            onClick={() => setConfirming(true)}
+            className="inline-flex items-center rounded-md bg-black text-white px-3 py-2 text-sm disabled:opacity-50"
+          >
+            Enviar transferencia
+          </button>
         )}
       </div>
 
-      {/* Inline confirm panel */}
+      {/* Panel de confirmación */}
       {confirming && (
         <div className="mt-3 rounded-lg border border-slate-300 bg-slate-50 p-4">
           <p className="text-sm font-medium text-slate-800 mb-1">¿Confirmar envío?</p>
@@ -367,24 +331,17 @@ export default function TransferPage() {
             <br />El receptor verá esta orden en la pestaña <span className="font-medium">Recepción</span>.
           </p>
           <div className="flex items-center gap-2">
-            <button
-              disabled={busy}
-              onClick={confirmAndSubmit}
-              className="inline-flex items-center rounded-md bg-black text-white px-4 py-2 text-sm disabled:opacity-50"
-            >
+            <button disabled={busy} onClick={confirmAndSubmit} className="inline-flex items-center rounded-md bg-black text-white px-4 py-2 text-sm disabled:opacity-50">
               {busy ? 'Enviando…' : 'Sí, enviar'}
             </button>
-            <button
-              disabled={busy}
-              onClick={() => setConfirming(false)}
-              className="inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-white disabled:opacity-50"
-            >
+            <button disabled={busy} onClick={() => setConfirming(false)} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-white disabled:opacity-50">
               Cancelar
             </button>
           </div>
         </div>
       )}
 
+      {/* Resultado */}
       {result && (
         <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4 text-sm">
           {result.kind === 'insufficient' && Array.isArray(result.insufficient) ? (
@@ -393,7 +350,7 @@ export default function TransferPage() {
               <ul className="list-disc pl-5 space-y-1">
                 {result.insufficient.map((it: any, idx: number) => (
                   <li key={idx}>
-                    El producto <span className="font-mono">{it.code}</span> solo tiene <strong>{it.available}</strong> piezas en existencia en "{result.origin || origin}" y se intentaron mover <strong>{it.requested}</strong>.
+                    <span className="font-mono">{it.code}</span> — solo hay <strong>{it.available}</strong> pzs disponibles, se intentaron mover <strong>{it.requested}</strong>.
                   </li>
                 ))}
               </ul>
@@ -401,57 +358,13 @@ export default function TransferPage() {
             </div>
           ) : result.kind === 'success' ? (
             <div className="text-slate-800">
-              <div className="font-semibold mb-1 text-green-700">
-                ✓ Orden de transferencia creada
-              </div>
-              <div className="text-slate-600 text-xs mt-1">
-                {result.message || 'Pendiente de recepción en destino.'}
-              </div>
-              {result.id && (
-                <div className="mt-2 text-xs text-slate-400 font-mono">ID: {result.id}</div>
-              )}
+              <div className="font-semibold mb-1 text-green-700">✓ Orden de transferencia creada</div>
+              <div className="text-slate-600 text-xs mt-1">{result.message || 'Pendiente de recepción en destino.'}</div>
+              {result.id && <div className="mt-2 text-xs text-slate-400 font-mono">ID: {result.id}</div>}
             </div>
           ) : (
             <pre className="rounded bg-slate-900 text-slate-100 p-3 text-xs overflow-auto">{JSON.stringify(result, null, 2)}</pre>
           )}
-        </div>
-      )}
-
-      {draftsFlag && showDrafts && (
-        <div className="mt-6 rounded-lg border border-slate-200 bg-white p-4 text-sm">
-          <div className="flex items-center justify-between">
-            <div className="font-semibold">Mis borradores</div>
-            <button onClick={refreshDrafts} className="text-xs underline">Actualizar</button>
-          </div>
-          <div className="mt-3 divide-y">
-            {drafts.length ? drafts.map((d) => (
-              <div key={d.id} className="py-2">
-                <div className="flex items-center gap-3">
-                  <div className="flex-1">
-                    <div className="font-medium">{d.draft_title || d.id}</div>
-                    <div className="text-xs text-slate-500">{d.origin_id || '—'} → {d.dest_id || '—'} • {new Date(d.updated_at || d.created_at || '').toLocaleString()}</div>
-                  </div>
-                  {cancelingDraftId !== d.id && (
-                    <>
-                      <button onClick={() => resumeDraft(d.id)} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50">Reanudar</button>
-                      <button onClick={() => validateDraft(d.id)} className="inline-flex items-center rounded-md bg-black text-white px-2 py-1 text-xs">Validar</button>
-                      <button onClick={() => setCancelingDraftId(d.id)} className="inline-flex items-center rounded-md border border-red-300 text-red-700 px-2 py-1 text-xs hover:bg-red-50">Cancelar</button>
-                    </>
-                  )}
-                </div>
-                {cancelingDraftId === d.id && (
-                  <div className="mt-2 rounded-md border border-red-200 bg-red-50 p-2 flex items-center gap-2">
-                    <span className="text-xs text-red-700 flex-1">¿Cancelar este borrador?</span>
-                    <button onClick={() => cancelDraft(d.id)} disabled={busy} className="inline-flex items-center rounded-md bg-red-600 text-white px-2 py-1 text-xs hover:bg-red-700 disabled:opacity-50">Sí</button>
-                    <button onClick={() => setCancelingDraftId(null)} disabled={busy} className="inline-flex items-center rounded-md border border-slate-300 px-2 py-1 text-xs hover:bg-white disabled:opacity-50">No</button>
-                  </div>
-                )}
-              </div>
-            )) : (
-              <div className="py-2 text-slate-500">No tienes borradores.
-              </div>
-            )}
-          </div>
         </div>
       )}
     </div>
