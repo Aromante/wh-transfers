@@ -65,7 +65,7 @@ export default function TransferPage() {
     }
   }, [locations])
 
-  const totalQty    = useMemo(() => lines.reduce((a, b) => a + b.qty, 0), [lines])
+  const totalBoxes  = useMemo(() => lines.filter(l => l.code.startsWith('BOX')).reduce((a, b) => a + b.qty, 0), [lines])
   const totalUnits  = useMemo(() => lines.reduce((a, b) => a + b.qty * (b.qtyPerBox ?? 1), 0), [lines])
 
   // Sum of units per base SKU (BOXM-ABUINF-30 + PER-ABUINF-30 → ABUINF-30)
@@ -298,7 +298,17 @@ export default function TransferPage() {
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-slate-50 text-left text-xs text-slate-500 uppercase tracking-wide">
-              <th className="px-3 py-2 border-b border-slate-200 font-medium">Código</th>
+              <th className="px-3 py-2 border-b border-slate-200 font-medium">
+                <div className="flex items-center gap-1.5">
+                  Código
+                  <button
+                    type="button"
+                    title="Agrupar por producto"
+                    onClick={() => setLines(prev => [...prev].sort((a, b) => baseCode(a.code).localeCompare(baseCode(b.code))))}
+                    className="text-slate-400 hover:text-slate-700 transition-colors leading-none"
+                  >⇅</button>
+                </div>
+              </th>
               <th className="px-3 py-2 border-b border-slate-200 font-medium">Cant</th>
               <th className="px-3 py-2 border-b border-slate-200 font-medium text-right">Total pzs</th>
               <th className="px-3 py-2 border-b border-slate-200 w-20" />
@@ -365,10 +375,8 @@ export default function TransferPage() {
       {/* Acciones */}
       <div className="mt-3 flex items-center gap-3 flex-wrap">
         <div className="text-slate-600">
-          {lines.length} línea{lines.length !== 1 ? 's' : ''}
-          {' · '}
-          {totalQty} caja{totalQty !== 1 ? 's' : ''}
-          {totalUnits !== totalQty && <> · <span className="font-semibold">{totalUnits} pzs</span></>}
+          {totalBoxes > 0 && <>{totalBoxes} caja{totalBoxes !== 1 ? 's' : ''} · </>}
+          <span className="font-semibold">{totalUnits} pzs</span>
         </div>
         {!confirming && (
           <button
@@ -386,7 +394,7 @@ export default function TransferPage() {
         <div className="mt-3 rounded-lg border border-slate-300 bg-slate-50 p-4">
           <p className="text-sm font-medium text-slate-800 mb-1">¿Confirmar envío?</p>
           <p className="text-xs text-slate-500 mb-3">
-            {origin} → {dest} · {lines.length} líneas · {totalQty} caja{totalQty !== 1 ? 's' : ''} · {totalUnits} pzs
+            {origin} → {dest} · {lines.length} línea{lines.length !== 1 ? 's' : ''}{totalBoxes > 0 ? ` · ${totalBoxes} caja${totalBoxes !== 1 ? 's' : ''}` : ''} · {totalUnits} pzs
             <br />El receptor verá esta orden en la pestaña <span className="font-medium">Recepción</span>.
           </p>
           <div className="flex items-center gap-2">
