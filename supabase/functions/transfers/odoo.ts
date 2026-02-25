@@ -77,12 +77,13 @@ export async function createOdooPickingFromLines(
     originRef: string,        // free-text origin reference (e.g. transfer UUID or shopify GID)
     transferId: string,       // internal UUID for logging
     logFn?: (env: Env, id: string, event: string, data: any) => Promise<void>,
-    destLocIdOverride?: number, // if provided, skip the Odoo location lookup for destId
+    originLocIdOverride?: number, // if provided, skip the Odoo location lookup for originId
+    destLocIdOverride?: number,   // if provided, skip the Odoo location lookup for destId
 ): Promise<{ pickingId: number; pickingName: string; finalState: string }> {
     const skus = [...linesBySku.keys()]
     const prodMap = await findProductsByCodes(env, skus)
     const pickingTypeId = await findInternalPickingType(env)
-    const originLocId = await findLocationIdByCompleteName(env, originId)
+    const originLocId = originLocIdOverride ?? await findLocationIdByCompleteName(env, originId)
     const destLocId = destLocIdOverride ?? await findLocationIdByCompleteName(env, destId)
 
     const moveLines: any[] = []

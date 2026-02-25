@@ -53,9 +53,9 @@ export async function handleShopifyTransferWebhook(req: Request, env: Env) {
         }
     }
 
-    // ── Find our internal transfer record ──
-    const rows = await sbSelect(env, 'transfers',
-        `shopify_transfer_id=eq.${encodeURIComponent(gid)}&select=id,origin_id,dest_id,status,odoo_picking_id`)
+    // ── Find our internal transfer record (via transfer_summary VIEW) ──
+    const rows = await sbSelect(env, 'transfer_summary',
+        `shopify_transfer_id=eq.${encodeURIComponent(gid)}&select=transfer_id,origin_id,dest_id,status,odoo_transfer_id`)
     const internalTransfer = rows?.[0]
 
     if (!internalTransfer) {
@@ -69,9 +69,12 @@ export async function handleShopifyTransferWebhook(req: Request, env: Env) {
         }
     }
 
+    // transfer_summary uses transfer_id (not id)
+    const transferId: string = internalTransfer.transfer_id
+
     if (internalTransfer.status === 'validated') {
         // Already processed by the primary flow — nothing to do
-        return { data: { skipped: true, reason: 'Transfer ya validado por flujo principal', transfer_id: internalTransfer.id } }
+        return { data: { skipped: true, reason: 'Transfer ya validado por flujo principal', transfer_id: transferId } }
     }
 
     // ── Build received qty map: sku → acceptedQty ──
@@ -88,7 +91,7 @@ export async function handleShopifyTransferWebhook(req: Request, env: Env) {
     }
 
     if (receivedQtyBySku.size === 0) {
-        await sbLogTransfer(env, internalTransfer.id, 'webhook_no_received_qty', {
+        await sbLogTransfer(env, transferId, 'webhook_no_received_qty', {
             shopify_transfer_id: gid, shipments_count: transferData.shipments.length,
         })
         return { data: { skipped: true, reason: 'No hay cantidades aceptadas en los shipments' } }
@@ -106,25 +109,24 @@ export async function handleShopifyTransferWebhook(req: Request, env: Env) {
             internalTransfer.dest_id,
             receivedQtyBySku,
             `shopify-webhook/${gid}`,
-            internalTransfer.id,
+            transferId,
             sbLogTransfer,
         )
         pickingId = result.pickingId
         pickingName = result.pickingName
         finalState = result.finalState
     } catch (e: any) {
-        await sbLogTransfer(env, internalTransfer.id, 'odoo_error', { error: (e as Error).message, shopify_transfer_id: gid })
+        await sbLogTransfer(env, transferId, 'odoo_error', { error: (e as Error).message, shopify_transfer_id: gid })
         return { error: `Error creando picking en Odoo: ${(e as Error).message}`, status: 500 }
     }
 
-    // ── Update internal transfer ──
-    await sbUpdateTransferById(env, internalTransfer.id, {
-        odoo_picking_id: pickingId,
-        picking_name: pickingName,
+    // ── Update all lines of this transfer (status + odoo_transfer_id) ──
+    await sbUpdateTransferById(env, transferId, {
+        odoo_transfer_id: pickingName,
         status: 'validated',
     })
 
-    await sbLogTransfer(env, internalTransfer.id, 'odoo_created_from_webhook', {
+    await sbLogTransfer(env, transferId, 'odoo_created_from_webhook', {
         pickingId,
         pickingName,
         state: finalState,
@@ -135,7 +137,7 @@ export async function handleShopifyTransferWebhook(req: Request, env: Env) {
 
     return {
         data: {
-            transfer_id: internalTransfer.id,
+            transfer_id: transferId,
             picking_id: pickingId,
             picking_name: pickingName,
             state: finalState,

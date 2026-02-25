@@ -2,9 +2,8 @@
 // Serves as Deno-based equivalent of the Cloudflare Worker
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { type Env, corsHeaders, json, mustEnv } from './helpers.ts'
-import { handleCreateTransfer, handleReceiveTransfer, handleCancelTransfer, handleValidateTransfer } from './routes-transfer.ts'
-import { handleListDrafts, handleCreateDraft, handleUpdateDraft, handleDeleteDraft, handleCommitDraft } from './routes-drafts.ts'
-import { handleGetLocations, handleGetTransfer, handleHistory, handleHistoryCSV, handleDuplicateTransfer, handleHealth, handleGetLogs, handleResolveCode, handleAdjustPlantaInventory } from './routes-misc.ts'
+import { handleCreateTransfer, handleReceiveTransfer, handleCancelTransfer } from './routes-transfer.ts'
+import { handleGetLocations, handleGetTransfer, handleHistory, handleHistoryCSV, handleHealth, handleGetLogs, handleResolveCode, handleAdjustPlantaInventory } from './routes-misc.ts'
 import { handleListBoxes, handleGetBox, handleResolveBox, handleCreateBox, handleUpdateBox, handleDeleteBox } from './routes-boxes.ts'
 import { handleShopifyTransferWebhook, handleRegisterWebhooks } from './routes-webhook.ts'
 
@@ -29,8 +28,6 @@ function envFromDeno(): Env {
         SHOPIFY_MUTATION_FIELD: g('SHOPIFY_MUTATION_FIELD', 'inventoryTransfer'),
         SHOPIFY_KRONI_LOCATION_ID: g('SHOPIFY_KRONI_LOCATION_ID'),
         SHOPIFY_CONQUISTA_LOCATION_ID: g('SHOPIFY_CONQUISTA_LOCATION_ID'),
-        ENABLE_MULTI_DRAFTS: g('ENABLE_MULTI_DRAFTS', '1'),
-        MAX_DRAFTS_PER_OWNER: g('MAX_DRAFTS_PER_OWNER', '3'),
     }
 }
 
@@ -56,8 +53,6 @@ serve(async (req: Request) => {
             result = await handleReceiveTransfer(req, env)
         else if (req.method === 'POST' && path === '/cancel')
             result = await handleCancelTransfer(req, env)
-        else if (req.method === 'POST' && path === '/validate')
-            result = await handleValidateTransfer(req, env)
         else if (req.method === 'GET' && path === '/transfer')
             result = await handleGetTransfer(req, env)
 
@@ -66,22 +61,6 @@ serve(async (req: Request) => {
             result = await handleHistory(req, env)
         else if (req.method === 'GET' && path === '/history/csv')
             result = await handleHistoryCSV(req, env)
-
-        // ── Duplicate ──
-        else if (req.method === 'POST' && path === '/duplicate')
-            result = await handleDuplicateTransfer(req, env)
-
-        // ── Drafts ──
-        else if (req.method === 'GET' && path === '/drafts')
-            result = await handleListDrafts(req, env)
-        else if (req.method === 'POST' && path === '/drafts')
-            result = await handleCreateDraft(req, env)
-        else if (req.method === 'PATCH' && path === '/drafts')
-            result = await handleUpdateDraft(req, env)
-        else if (req.method === 'DELETE' && path === '/drafts')
-            result = await handleDeleteDraft(req, env)
-        else if (req.method === 'POST' && path === '/drafts/commit')
-            result = await handleCommitDraft(req, env)
 
         // ── Logs ──
         else if (req.method === 'GET' && path === '/logs')

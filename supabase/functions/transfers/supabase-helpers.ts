@@ -1,4 +1,4 @@
-import { type Env, chunk } from './helpers.ts'
+import { type Env } from './helpers.ts'
 
 // ── Location row from transfer_locations VIEW ──
 export type LocationRow = {
@@ -22,6 +22,24 @@ export type BoxRow = {
     odoo_product_id: number | null
     qty_per_box: number
     is_active: boolean
+}
+
+// ── Transfer row from transfer_summary VIEW ──
+export type TransferSummaryRow = {
+    transfer_id: string
+    origin_id: string
+    dest_id: string
+    origin_odoo_id: number | null
+    dest_odoo_id: number | null
+    origin_shopify_id: number | null
+    dest_shopify_id: number | null
+    status: string
+    odoo_transfer_id: string | null
+    shopify_transfer_id: string | null
+    created_at: string
+    sku_count: number
+    total_units: number
+    lines: Array<{ sku: string; qty: number; product_name: string | null; box_barcode: string | null }>
 }
 
 function sbHeaders(env: Env) {
@@ -74,46 +92,20 @@ export async function resolveBox(env: Env, barcode: string): Promise<BoxRow | nu
     return rows?.[0] || null
 }
 
-// ── Transfer helpers (real tables: transfers + transfer_lines) ──
-export async function sbGetTransferById(env: Env, id: string) {
-    const rows = await sbSelect(env, 'transfers', `id=eq.${encodeURIComponent(id)}&select=*`)
+// ── Transfer helpers — reads from transfer_summary VIEW ──
+// transfer_summary groups transfer_lines by transfer_id.
+// NOTE: The view returns one row per transfer; status/odoo_transfer_id/shopify_transfer_id
+//       are guaranteed consistent because all lines of a transfer share the same values.
+export async function sbGetTransferById(env: Env, id: string): Promise<TransferSummaryRow | null> {
+    const rows = await sbSelect(env, 'transfer_summary', `transfer_id=eq.${encodeURIComponent(id)}&select=*`)
     return rows?.[0] || null
 }
 
-export async function sbGetTransferLinesByTransferId(env: Env, transferId: string) {
-    return sbSelect(env, 'transfer_lines', `transfer_id=eq.${encodeURIComponent(transferId)}&select=*&order=id.asc`)
-}
-
+// Patch all lines belonging to a transfer (status, odoo_transfer_id, shopify_transfer_id, etc.)
 export async function sbUpdateTransferById(env: Env, id: string, patch: Record<string, any>) {
-    const rows = await sbPatch(env, 'transfers', `id=eq.${encodeURIComponent(id)}`, patch)
-    return rows?.[0] || null
-}
-
-export async function sbGetByClientTransferId(env: Env, clientId: string) {
-    return sbSelect(env, 'transfers', `client_transfer_id=eq.${encodeURIComponent(clientId)}&select=id,odoo_picking_id,picking_name,status`)
+    return sbPatch(env, 'transfer_lines', `transfer_id=eq.${encodeURIComponent(id)}`, patch)
 }
 
 export async function sbLogTransfer(env: Env, transferId: string, event: string, detail: any) {
     try { await sbInsert(env, 'transfer_logs', [{ transfer_id: transferId, event, detail }]) } catch { }
-}
-
-// Forecasting upsert (strict per-row approach)
-export async function sbUpsertForecastingTodayStrict(env: Env, items: { sku: string; location_id: number; in_transit_units: number }[]) {
-    const clean = items
-        .map(it => ({ sku: String(it.sku || '').trim(), location_id: Number(it.location_id), in_transit_units: Number(it.in_transit_units || 0) }))
-        .filter(it => it.sku.length > 0 && Number.isFinite(it.location_id) && it.location_id > 0)
-    const results: any[] = []
-    for (const row of clean) {
-        const q = `sku=eq.${row.sku}&location_id=eq.${row.location_id}`
-        const patchUrl = `${env.SUPABASE_URL}/rest/v1/forecasting_inventory_today?${q}`
-        const rPatch = await fetch(patchUrl, { method: 'PATCH', headers: { ...sbHeaders(env), prefer: 'return=representation' }, body: JSON.stringify({ in_transit_units: row.in_transit_units }) })
-        if (rPatch.ok) {
-            const body = await rPatch.json().catch(() => [])
-            if (Array.isArray(body) && body.length > 0) { results.push(body); continue }
-        }
-        const rPost = await fetch(`${env.SUPABASE_URL}/rest/v1/forecasting_inventory_today`, { method: 'POST', headers: { ...sbHeaders(env), prefer: 'return=representation' }, body: JSON.stringify([row]) })
-        if (!rPost.ok) { const errTxt = await rPost.text().catch(() => ''); throw new Error(`forecasting upsert failed: ${errTxt}`) }
-        results.push(await rPost.json())
-    }
-    return results.flat()
 }

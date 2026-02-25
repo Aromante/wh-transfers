@@ -1,12 +1,11 @@
-// History, locations, health, duplicate, CSV routes
-import { type Env, boolFlag, parseListParam } from './helpers.ts'
-import { sbSelect, sbInsert, sbLogTransfer, sbGetTransferById, sbGetTransferLinesByTransferId, sbListLocations, resolveBox } from './supabase-helpers.ts'
+// History, locations, health, resolve, CSV, adjust-planta routes
+import { type Env } from './helpers.ts'
+import { sbSelect, sbInsert, sbLogTransfer, sbGetTransferById, sbListLocations, resolveBox } from './supabase-helpers.ts'
 import { findProductByCode, findProductsByCodes } from './odoo.ts'
 import { shopifyGraphQLWithVersion, adjustShopifyPlantaInventory } from './shopify.ts'
 
 export async function handleGetLocations(env: Env) {
     // Reads from the transfer_locations VIEW (join of shopify_locations + odoo_locations)
-    // Returns can_be_origin and can_be_destination computed dynamically from Shopify flags
     const rows = await sbListLocations(env)
     return { data: rows }
 }
@@ -17,8 +16,8 @@ export async function handleGetTransfer(req: Request, env: Env) {
     if (!id) return { error: 'id requerido', status: 400 }
     const transfer = await sbGetTransferById(env, id)
     if (!transfer) return { error: 'Transfer no encontrado', status: 404 }
-    const lines = await sbGetTransferLinesByTransferId(env, id)
-    return { data: { ...transfer, lines } }
+    // transfer_summary already includes the lines array — no extra query needed
+    return { data: transfer }
 }
 
 export async function handleHistory(req: Request, env: Env) {
@@ -32,16 +31,16 @@ export async function handleHistory(req: Request, env: Env) {
     const from = url.searchParams.get('from') || ''
     const to = url.searchParams.get('to') || ''
 
-    // Use transfer_log VIEW which joins transfers + transfer_lines + transfer_locations
-    let q = `select=id,client_transfer_id,origin_id,dest_id,origin_name,dest_name,status,picking_name,odoo_picking_id,draft_owner,draft_title,created_at,updated_at,lines&order=created_at.desc&limit=${limit}&offset=${offset}`
+    // Read from transfer_summary VIEW — one row per transfer with aggregated lines
+    let q = `select=transfer_id,origin_id,dest_id,origin_odoo_id,dest_odoo_id,status,odoo_transfer_id,shopify_transfer_id,created_at,sku_count,total_units,lines&order=created_at.desc&limit=${limit}&offset=${offset}`
     if (status) q += `&status=eq.${encodeURIComponent(status)}`
     if (origin) q += `&origin_id=eq.${encodeURIComponent(origin)}`
     if (dest) q += `&dest_id=eq.${encodeURIComponent(dest)}`
     if (from) q += `&created_at=gte.${encodeURIComponent(from)}`
     if (to) q += `&created_at=lte.${encodeURIComponent(to)}`
-    if (search) q += `&or=(picking_name.ilike.*${encodeURIComponent(search)}*,client_transfer_id.ilike.*${encodeURIComponent(search)}*)`
+    if (search) q += `&or=(odoo_transfer_id.ilike.*${encodeURIComponent(search)}*,transfer_id.ilike.*${encodeURIComponent(search)}*)`
 
-    const rows = await sbSelect(env, 'transfer_log', q)
+    const rows = await sbSelect(env, 'transfer_summary', q)
     return { data: rows }
 }
 
@@ -50,37 +49,12 @@ export async function handleHistoryCSV(req: Request, env: Env) {
     const rows: any[] = (result as any).data || []
     if (!rows.length) return { csv: 'No data', contentType: 'text/csv' }
 
-    const headers = ['id', 'client_transfer_id', 'origin_id', 'dest_id', 'origin_name', 'dest_name', 'status', 'picking_name', 'created_at']
+    const headers = ['transfer_id', 'origin_id', 'dest_id', 'origin_odoo_id', 'dest_odoo_id', 'status', 'odoo_transfer_id', 'shopify_transfer_id', 'sku_count', 'total_units', 'created_at']
     const csvLines = [headers.join(',')]
     for (const r of rows) {
         csvLines.push(headers.map(h => `"${String(r[h] ?? '').replace(/"/g, '""')}"`).join(','))
     }
     return { csv: csvLines.join('\n'), contentType: 'text/csv' }
-}
-
-export async function handleDuplicateTransfer(req: Request, env: Env) {
-    const body = await req.json()
-    const { transfer_id } = body as any
-    if (!transfer_id) return { error: 'transfer_id requerido', status: 400 }
-    const transfer = await sbGetTransferById(env, transfer_id)
-    if (!transfer) return { error: 'Transfer no encontrado', status: 404 }
-    const lines = await sbGetTransferLinesByTransferId(env, transfer_id)
-
-    const newId = crypto.randomUUID()
-    await sbInsert(env, 'transfers', [{
-        id: newId, origin_id: transfer.origin_id, dest_id: transfer.dest_id,
-        status: 'draft', client_transfer_id: null,
-        draft_owner: transfer.draft_owner, draft_title: transfer.draft_title,
-    }])
-    if (lines.length) {
-        const newLines = lines.map((l: any) => ({
-            transfer_id: newId, barcode: l.barcode, sku: l.sku, qty: l.qty,
-            product_name: l.product_name, odoo_product_id: l.odoo_product_id, uom_name: l.uom_name,
-        }))
-        try { await sbInsert(env, 'transfer_lines', newLines) } catch { }
-    }
-    await sbLogTransfer(env, newId, 'duplicated_from', { source_id: transfer_id })
-    return { data: { id: newId, duplicated_from: transfer_id } }
 }
 
 export async function handleHealth(env: Env) {
@@ -158,9 +132,6 @@ export async function handleResolveCode(req: Request, env: Env) {
 
 // ── POST /shopify/adjust-planta ───────────────────────────────────────────────
 // Ajuste manual de inventario en Planta Productora (Shopify).
-// Úsalo para sincronizar producciones/manufacturas de Odoo que no llegan
-// automáticamente a Shopify.
-//
 // Body: { lines: [{ sku: "PER-ABUINF-30", delta: 50 }, ...] }
 //   delta > 0 → suma (nueva producción)
 //   delta < 0 → resta (corrección)
@@ -173,7 +144,6 @@ export async function handleAdjustPlantaInventory(req: Request, env: Env) {
     if (!Array.isArray(lines) || !lines.length)
         return { error: 'lines requerido: [{ sku, delta }]', status: 400 }
 
-    // Parse and validate lines
     const parsed: Array<{ sku: string; delta: number }> = []
     for (const ln of lines) {
         const sku = String(ln.sku || '').trim()
@@ -184,11 +154,9 @@ export async function handleAdjustPlantaInventory(req: Request, env: Env) {
     }
     if (!parsed.length) return { error: 'No hay líneas válidas (sku + delta != 0)', status: 400 }
 
-    // Resolve shopify_inventory_item_id for each SKU via Odoo product catalog
     const skus = parsed.map(l => l.sku)
     const prodMap = await findProductsByCodes(env, skus)
 
-    // Build itemQtyMap: inventoryItemId → delta (signed, not negated here)
     const itemQtyMap = new Map<number, number>()
     const notFound: string[] = []
 
@@ -211,12 +179,10 @@ export async function handleAdjustPlantaInventory(req: Request, env: Env) {
         }
     }
 
-    // negate=false: usamos delta directo del caller (puede ser + o -)
     await adjustShopifyPlantaInventory(
         env,
         itemQtyMap,
         async (event, data) => {
-            // Log sin transfer_id (ajuste manual, no asociado a un transfer)
             const logUrl = `${env.SUPABASE_URL}/rest/v1/transfer_logs`
             await fetch(logUrl, {
                 method: 'POST',
