@@ -233,7 +233,12 @@ export default function TransferPage() {
       if (r.ok) {
         const t = (data as any)?.data?.transfer || (data as any)?.transfer || data
         const message = (data as any)?.data?.message || null
-        setResult({ ok: true, kind: 'success', id: t?.transfer_id || t?.id, status: t?.status, message })
+        const earlySync = (data as any)?.data?.kroni_early_sync || null
+        setResult({
+          ok: true, kind: 'success', id: t?.transfer_id || t?.id, status: t?.status, message,
+          odoo_transfer_id: t?.odoo_transfer_id || earlySync?.pickingName || null,
+          odoo_picking_id: earlySync?.pickingId || null,
+        })
         setLines([])
       } else {
         const inner = (data as any)?.data || data
@@ -508,6 +513,21 @@ export default function TransferPage() {
                     </div>
                     <h3 className="text-lg font-semibold text-slate-900">Orden creada exitosamente</h3>
                     {result.id && <p className="text-xs text-slate-400 font-mono">ID: {result.id}</p>}
+                    {result.odoo_transfer_id && (
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-sm text-slate-600">Odoo:</span>
+                        {result.odoo_picking_id ? (
+                          <a
+                            href={`https://aromantemx.odoo.com/odoo/action-380/${result.odoo_picking_id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm font-mono text-blue-600 hover:underline"
+                          >{result.odoo_transfer_id}</a>
+                        ) : (
+                          <span className="text-sm font-mono text-slate-700">{result.odoo_transfer_id}</span>
+                        )}
+                      </div>
+                    )}
                     <button onClick={closeModal} className="mt-2 w-full rounded-lg bg-black text-white px-4 py-2.5 text-sm font-medium">
                       Aceptar
                     </button>
