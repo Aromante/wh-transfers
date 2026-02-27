@@ -1,0 +1,26 @@
+{
+  "function": "transfers",
+  "version": 45,
+  "supabase_deploy_versions": [46, 47],
+  "timestamp": "2026-02-27T01:32:00.000Z",
+  "status": "deployed",
+  "files": [
+    "helpers_v45.ts",
+    "index_v45.ts",
+    "odoo_v45.ts",
+    "routes-boxes_v45.ts",
+    "routes-misc_v45.ts",
+    "routes-transfer_v45.ts",
+    "routes-webhook_v45.ts",
+    "shopify_v45.ts",
+    "supabase-helpers_v45.ts"
+  ],
+  "changes": [
+    "Shopify API version: '2024-04' → '2025-10' (all files)",
+    "Version guards: '202404' → '202507' (shopify.ts)",
+    "Removed 6x @idempotent directives from Shopify mutations (shopify.ts)",
+    "Added shopify_transfer_id to /receive response (routes-transfer.ts)",
+    "EF_VERSION bumped 44 → 45 (helpers.ts)"
+  ],
+  "notes": "Deployed twice: Supabase v46 (API version fix) then v47 (removed @idempotent). Both bugs documented in memory/shopify-api-lessons.md."
+}

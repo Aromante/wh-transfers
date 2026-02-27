@@ -12,8 +12,6 @@ export default function ScannerInput({ onScan, autoFocusEnabled = true }: Props)
   useEffect(() => {
     if (!autoFocusEnabled) return
     ref.current?.focus()
-    const id = setInterval(() => ref.current?.focus(), 6000) // mantener foco (cada 6s)
-    return () => clearInterval(id)
   }, [autoFocusEnabled])
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -21,6 +19,7 @@ export default function ScannerInput({ onScan, autoFocusEnabled = true }: Props)
       const code = value.trim()
       if (code) onScan(code)
       setValue('')
+      ref.current?.focus()
     }
   }
 

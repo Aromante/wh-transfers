@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import useLocations from '../hooks/useLocations'
-import LocationSelect from '../components/LocationSelect'
+import LocationSelect, { LocationLabel } from '../components/LocationSelect'
 import { genId } from '../lib/uuid'
-import { getUserId } from '../lib/user'
+import { ep, apiHeaders } from '../lib/api'
 
 type Line = { id: string; code: string; qty: number; name?: string | null; qtyPerBox?: number | null }
 
@@ -25,11 +25,6 @@ function baseCode(code: string): string {
   return idx >= 0 ? code.slice(idx + 1) : code
 }
 
-function ep() {
-  const base = (import.meta as any).env?.VITE_API_BASE || ''
-  return String(base || '').replace(/\/$/, '') || '/api/transfers'
-}
-
 export default function TransferPage() {
   const { locations, loading } = useLocations()
   const [origin, setOrigin] = useState<string>('')
@@ -50,11 +45,9 @@ export default function TransferPage() {
   const [showSuggestions, setShowSuggestions] = useState(false)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
-  // Auto-focus — keeps focus on the input so a scanner can send codes at any time
+  // Initial focus for scanner
   useEffect(() => {
     inputRef.current?.focus()
-    const id = setInterval(() => inputRef.current?.focus(), 6000)
-    return () => clearInterval(id)
   }, [])
 
   useEffect(() => {
@@ -95,17 +88,19 @@ export default function TransferPage() {
     const existing = lines.find(l => l.code === code)
     if (existing) {
       setLines(prev => prev.map(l => l.id === existing.id ? { ...l, qty: l.qty + 1 } : l))
+      inputRef.current?.focus()
       return
     }
     // Use prefetched data (from autocomplete) to avoid a second round-trip
     if (prefetched) {
       setLines(prev => [...prev, { id: genId(), code, qty: 1, name: prefetched.name, qtyPerBox: prefetched.qty_per_box }])
+      inputRef.current?.focus()
       return
     }
     setResolving(true)
     try {
-      const r = await fetch(`${ep()}/resolve?code=${encodeURIComponent(code)}`, {
-        headers: { 'X-User-Id': getUserId() },
+      const r = await fetch(ep(`/resolve?code=${encodeURIComponent(code)}`), {
+        headers: apiHeaders(),
       })
       if (!r.ok) {
         setScanError(`"${code}" no encontrado en el catálogo. Verifica el código e intenta de nuevo.`)
@@ -118,6 +113,7 @@ export default function TransferPage() {
       setScanError(`Error validando "${code}": ${String(e?.message || e)}`)
     } finally {
       setResolving(false)
+      inputRef.current?.focus()
     }
   }
 
@@ -130,8 +126,8 @@ export default function TransferPage() {
     suggestTimeoutRef.current = setTimeout(async () => {
       setSuggestLoading(true)
       try {
-        const r = await fetch(`${ep()}/resolve?code=${encodeURIComponent(val.trim())}`, {
-          headers: { 'X-User-Id': getUserId() },
+        const r = await fetch(ep(`/resolve?code=${encodeURIComponent(val.trim())}`), {
+          headers: apiHeaders(),
         })
         const data = await r.json()
         if (r.ok && data?.data) {
@@ -181,8 +177,8 @@ export default function TransferPage() {
     // Resolve new codes in parallel
     const results = await Promise.allSettled(
       newCodes.map(async code => {
-        const r = await fetch(`${ep()}/resolve?code=${encodeURIComponent(code)}`, {
-          headers: { 'X-User-Id': getUserId() },
+        const r = await fetch(ep(`/resolve?code=${encodeURIComponent(code)}`), {
+          headers: apiHeaders(),
         })
         if (!r.ok) throw new Error(code)
         const data = await r.json()
@@ -202,6 +198,7 @@ export default function TransferPage() {
     if (failed.length) setScanError(`No encontrados: ${failed.join(', ')}`)
 
     setBulkPasting(false)
+    inputRef.current?.focus()
   }
 
   const selectSuggestion = (s: { code: string; name: string; qty_per_box: number | null }) => {
@@ -229,7 +226,7 @@ export default function TransferPage() {
       }
       const r = await fetch(ep(), {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
+        headers: apiHeaders({ 'content-type': 'application/json' }),
         body: JSON.stringify(body),
       })
       const data = await r.json()
@@ -238,7 +235,6 @@ export default function TransferPage() {
         const message = (data as any)?.data?.message || null
         setResult({ ok: true, kind: 'success', id: t?.transfer_id || t?.id, status: t?.status, message })
         setLines([])
-        setConfirming(false)
       } else {
         const inner = (data as any)?.data || data
         if (inner?.kind === 'insufficient') {
@@ -252,11 +248,7 @@ export default function TransferPage() {
     } finally { setBusy(false) }
   }
 
-  const confirmAndSubmit = async () => {
-    if (!lines.length || !origin || !dest) return
-    setConfirming(false)
-    await submit()
-  }
+  const closeModal = () => { setConfirming(false); setResult(null) }
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
@@ -336,8 +328,13 @@ export default function TransferPage() {
         </div>
 
         {(resolving || bulkPasting) && (
-          <div className="mt-1 text-xs text-slate-500">
-            {bulkPasting ? 'Procesando lista…' : 'Validando código…'}
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+            <div className="rounded-2xl bg-white shadow-xl px-8 py-6 flex flex-col items-center gap-3">
+              <div className="h-8 w-8 animate-spin rounded-full border-[3px] border-slate-200 border-t-slate-600" />
+              <p className="text-sm text-slate-700 font-medium">
+                {bulkPasting ? 'Procesando lista…' : 'Validando código…'}
+              </p>
+            </div>
           </div>
         )}
         {scanError && !resolving && (
@@ -433,60 +430,125 @@ export default function TransferPage() {
           {totalBoxes > 0 && <>{totalBoxes} caja{totalBoxes !== 1 ? 's' : ''} · </>}
           <span className="font-semibold">{totalUnits} pzs</span>
         </div>
-        {!confirming && (
-          <button
-            disabled={!lines.length || busy || loading || !origin || !dest}
-            onClick={() => setConfirming(true)}
-            className="inline-flex items-center rounded-md bg-black text-white px-3 py-2 text-sm disabled:opacity-50"
-          >
-            Enviar transferencia
-          </button>
-        )}
+        <button
+          disabled={!lines.length || busy || loading || !origin || !dest}
+          onClick={() => { setResult(null); setConfirming(true) }}
+          className="inline-flex items-center rounded-md bg-black text-white px-3 py-2 text-sm disabled:opacity-50"
+        >
+          Enviar transferencia
+        </button>
       </div>
 
-      {/* Panel de confirmación */}
+      {/* Modal de confirmación / resultado */}
       {confirming && (
-        <div className="mt-3 rounded-lg border border-slate-300 bg-slate-50 p-4">
-          <p className="text-sm font-medium text-slate-800 mb-1">¿Confirmar envío?</p>
-          <p className="text-xs text-slate-500 mb-3">
-            {origin} → {dest} · {lines.length} línea{lines.length !== 1 ? 's' : ''}{totalBoxes > 0 ? ` · ${totalBoxes} caja${totalBoxes !== 1 ? 's' : ''}` : ''} · {totalUnits} pzs
-            <br />El receptor verá esta orden en la pestaña <span className="font-medium">Recepción</span>.
-          </p>
-          <div className="flex items-center gap-2">
-            <button disabled={busy} onClick={confirmAndSubmit} className="inline-flex items-center rounded-md bg-black text-white px-4 py-2 text-sm disabled:opacity-50">
-              {busy ? 'Enviando…' : 'Sí, enviar'}
-            </button>
-            <button disabled={busy} onClick={() => setConfirming(false)} className="inline-flex items-center rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-white disabled:opacity-50">
-              Cancelar
-            </button>
-          </div>
-        </div>
-      )}
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          onClick={() => { if (!busy) closeModal() }}
+        >
+          <div
+            className="relative max-w-md w-full mx-4 rounded-2xl bg-white shadow-xl p-6"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Estado A: Confirmar */}
+            {!busy && !result && (
+              <>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold text-slate-900">Confirmar envío</h2>
+                  <button onClick={closeModal} className="text-slate-400 hover:text-slate-600">
+                    <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 text-sm mb-4">
+                  <LocationLabel code={origin} />
+                  <span className="text-slate-400">→</span>
+                  <LocationLabel code={dest} />
+                </div>
+                <div className="flex items-center gap-4 text-sm text-slate-600 mb-6">
+                  {totalBoxes > 0 && (
+                    <span className="flex items-center gap-1.5">
+                      <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
+                      {totalBoxes} caja{totalBoxes !== 1 ? 's' : ''}
+                    </span>
+                  )}
+                  <span className="flex items-center gap-1.5">
+                    <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" /><path strokeLinecap="round" strokeLinejoin="round" d="M6 6h.008v.008H6V6z" /></svg>
+                    {lines.length} SKU{lines.length !== 1 ? 's' : ''}
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" /></svg>
+                    {totalUnits} unidades
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={submit} className="flex-1 rounded-lg bg-black text-white px-4 py-2.5 text-sm font-medium">
+                    Confirmar envío
+                  </button>
+                  <button onClick={closeModal} className="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium hover:bg-slate-50">
+                    Cancelar
+                  </button>
+                </div>
+              </>
+            )}
 
-      {/* Resultado */}
-      {result && (
-        <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4 text-sm">
-          {result.kind === 'insufficient' && Array.isArray(result.insufficient) ? (
-            <div className="text-slate-800">
-              <div className="font-semibold mb-2">No se pudo procesar el envío:</div>
-              <ul className="list-disc pl-5 space-y-1">
-                {result.insufficient.map((it: any, idx: number) => (
-                  <li key={idx}>
-                    <span className="font-mono">{it.code}</span> — solo hay <strong>{it.available}</strong> pzs disponibles, se intentaron mover <strong>{it.requested}</strong>.
-                  </li>
-                ))}
-              </ul>
-              <div className="mt-2 text-slate-600">Ajusta las cantidades o revisa existencias en la ubicación de origen.</div>
-            </div>
-          ) : result.kind === 'success' ? (
-            <div className="text-slate-800">
-              <div className="font-semibold mb-1 text-green-700">✓ Orden de transferencia creada</div>
-              <div className="text-slate-600 text-xs mt-1">{result.message || 'Pendiente de recepción en destino.'}</div>
-              {result.id && <div className="mt-2 text-xs text-slate-400 font-mono">ID: {result.id}</div>}
-            </div>
-          ) : (
-            <pre className="rounded bg-slate-900 text-slate-100 p-3 text-xs overflow-auto">{JSON.stringify(result, null, 2)}</pre>
-          )}
+            {/* Estado B: Enviando */}
+            {busy && (
+              <div className="flex flex-col items-center py-8 gap-4">
+                <div className="h-10 w-10 animate-spin rounded-full border-[3px] border-slate-200 border-t-slate-600" />
+                <p className="text-sm text-slate-600 font-medium">Enviando transferencia…</p>
+              </div>
+            )}
+
+            {/* Estado C: Resultado */}
+            {!busy && result && (
+              <>
+                {result.kind === 'success' ? (
+                  <div className="flex flex-col items-center py-4 gap-3">
+                    <div className="h-12 w-12 rounded-full bg-green-100 flex items-center justify-center">
+                      <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+                    </div>
+                    <h3 className="text-lg font-semibold text-slate-900">Orden creada exitosamente</h3>
+                    {result.id && <p className="text-xs text-slate-400 font-mono">ID: {result.id}</p>}
+                    <button onClick={closeModal} className="mt-2 w-full rounded-lg bg-black text-white px-4 py-2.5 text-sm font-medium">
+                      Aceptar
+                    </button>
+                  </div>
+                ) : result.kind === 'insufficient' && Array.isArray(result.insufficient) ? (
+                  <div className="py-2">
+                    <div className="flex flex-col items-center gap-2 mb-4">
+                      <div className="h-12 w-12 rounded-full bg-red-100 flex items-center justify-center">
+                        <svg className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                      </div>
+                      <h3 className="text-lg font-semibold text-slate-900">Stock insuficiente</h3>
+                    </div>
+                    <ul className="space-y-2 mb-4">
+                      {result.insufficient.map((it: any, idx: number) => (
+                        <li key={idx} className="flex items-center justify-between rounded-lg bg-red-50 px-3 py-2 text-sm">
+                          <span className="font-mono text-slate-700">{it.code}</span>
+                          <span className="text-red-700">
+                            disponible <strong>{it.available}</strong> / solicitado <strong>{it.requested}</strong>
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <button onClick={closeModal} className="w-full rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium hover:bg-slate-50">
+                      Entendido
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center py-4 gap-3">
+                    <div className="h-12 w-12 rounded-full bg-red-100 flex items-center justify-center">
+                      <svg className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                    </div>
+                    <h3 className="text-lg font-semibold text-slate-900">Error</h3>
+                    <p className="text-sm text-slate-600 text-center">{result.error || JSON.stringify(result.data || result)}</p>
+                    <button onClick={closeModal} className="mt-2 w-full rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium hover:bg-slate-50">
+                      Cerrar
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>

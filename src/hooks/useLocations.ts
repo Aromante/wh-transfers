@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { ep, apiHeaders } from '../lib/api'
 
 export type Location = {
   code: string
@@ -6,11 +7,6 @@ export type Location = {
   is_default_origin: boolean
   can_be_origin: boolean
   can_be_destination: boolean
-}
-
-function efBase() {
-  const base = (import.meta as any).env?.VITE_API_BASE || ''
-  return String(base || '').replace(/\/$/, '')
 }
 
 const FALLBACK: Location[] = [
@@ -31,9 +27,7 @@ export default function useLocations() {
       setLoading(true)
       setError(null)
       try {
-        const base = efBase()
-        if (!base) { if (!aborted) { setData(FALLBACK); setLoading(false) } return }
-        const r = await fetch(`${base}/locations`)
+        const r = await fetch(ep('/locations'), { headers: apiHeaders() })
         if (!r.ok) throw new Error(`locations fetch failed: ${r.status}`)
         const json = await r.json()
         const rows: any[] = Array.isArray(json?.data) ? json.data : (Array.isArray(json) ? json : [])

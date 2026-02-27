@@ -1,13 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import ScannerInput from '../components/ScannerInput'
-import { LocationLabel, locMeta } from '../components/LocationSelect'
+import { LocationLabel } from '../components/LocationSelect'
 import { genId } from '../lib/uuid'
-import { getUserId } from '../lib/user'
-
-function ep() {
-  const base = (import.meta as any).env?.VITE_API_BASE || ''
-  return String(base || '').replace(/\/$/, '') || '/api/transfers'
-}
+import { ep, apiHeaders } from '../lib/api'
 
 type PendingTransfer = {
   transfer_id: string
@@ -87,8 +82,8 @@ export default function ReceivePage() {
     setLoading(true)
     setError(null)
     try {
-      const r = await fetch(`${ep()}/history?status=pending&limit=100`, {
-        headers: { 'X-User-Id': getUserId() },
+      const r = await fetch(ep('/history?status=pending&limit=100'), {
+        headers: apiHeaders(),
       })
       const data = await r.json()
       if (!r.ok) throw new Error(data?.error || `Error ${r.status}`)
@@ -121,8 +116,8 @@ export default function ReceivePage() {
     setLoadingDetail(transfer.transfer_id)
     setExpandedId(transfer.transfer_id)
     try {
-      const r = await fetch(`${ep()}/transfer?id=${encodeURIComponent(transfer.transfer_id)}`, {
-        headers: { 'X-User-Id': getUserId() },
+      const r = await fetch(ep(`/transfer?id=${encodeURIComponent(transfer.transfer_id)}`), {
+        headers: apiHeaders(),
       })
       const json = await r.json()
       const meta = json?.data || json
@@ -141,8 +136,8 @@ export default function ReceivePage() {
       if (transfer.lines) {
         rawLines = transfer.lines
       } else {
-        const r = await fetch(`${ep()}/transfer?id=${encodeURIComponent(transfer.transfer_id)}`, {
-          headers: { 'X-User-Id': getUserId() },
+        const r = await fetch(ep(`/transfer?id=${encodeURIComponent(transfer.transfer_id)}`), {
+          headers: apiHeaders(),
         })
         const json = await r.json()
         const meta = json?.data || json
@@ -201,21 +196,20 @@ export default function ReceivePage() {
 
     setBusy(true)
     setResult(null)
-    setConfirming(false)
     try {
       const body = {
         transfer_id: selected.transfer_id,
         lines: validLines.map(l => ({ sku: l.code, qty: l.qty })),
       }
-      const r = await fetch(`${ep()}/receive`, {
+      const r = await fetch(ep('/receive'), {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
+        headers: apiHeaders({ 'content-type': 'application/json' }),
         body: JSON.stringify(body),
       })
       const data = await r.json()
       if (r.ok) {
         const d = data?.data || data
-        setResult({ ok: true, pickingName: d?.picking_name, state: d?.state, message: d?.message })
+        setResult({ ok: true, pickingName: d?.picking_name, pickingId: d?.picking_id, state: d?.state, shopifyTransferId: d?.shopify_transfer_id, message: d?.message })
         await loadPending()
       } else {
         setResult({ ok: false, error: data?.error || `Error ${r.status}` })
@@ -227,14 +221,21 @@ export default function ReceivePage() {
     }
   }
 
+  const closeModal = () => {
+    const wasSuccess = result?.ok
+    setConfirming(false)
+    setResult(null)
+    if (wasSuccess) setView('list')
+  }
+
   // ── Cancel transfer ────────────────────────────────────────────────────────
   const cancelTransfer = async (transferId: string) => {
     setCancelingId(null)
     setBusy(true)
     try {
-      const r = await fetch(`${ep()}/cancel`, {
+      const r = await fetch(ep('/cancel'), {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
+        headers: apiHeaders({ 'content-type': 'application/json' }),
         body: JSON.stringify({ transfer_id: transferId }),
       })
       const data = await r.json()
@@ -473,34 +474,8 @@ export default function ReceivePage() {
         </div>
       </div>
 
-      {/* Result */}
-      {result && (
-        <div className={`mb-5 rounded-xl border p-4 text-sm ${result.ok ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'}`}>
-          {result.ok ? (
-            <div className="text-green-800">
-              <div className="font-semibold mb-1">✓ Recepción confirmada</div>
-              {result.pickingName && (
-                <div className="text-sm">
-                  Picking Odoo: <span className="font-mono font-medium">{result.pickingName}</span>
-                  {result.state && <span className="ml-2 text-green-600 text-xs">({result.state})</span>}
-                </div>
-              )}
-              <button onClick={() => setView('list')} className="mt-3 text-sm underline text-green-700 underline-offset-2">
-                Ver otras órdenes pendientes →
-              </button>
-            </div>
-          ) : (
-            <div className="text-red-700 font-medium">
-              Error: {result.error}
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Scanner + table */}
-      {!result?.ok && (
-        <>
-          <div className="mb-4">
+      <div className="mb-4">
             <ScannerInput onScan={onScan} autoFocusEnabled={true} />
           </div>
 
@@ -589,7 +564,7 @@ export default function ReceivePage() {
               </button>
               <button
                 disabled={busy || !lines.some(l => l.qty > 0)}
-                onClick={() => setConfirming(true)}
+                onClick={() => { setResult(null); setConfirming(true) }}
                 className="rounded-lg bg-black text-white px-4 py-2 text-sm font-medium hover:bg-slate-800 disabled:opacity-50"
               >
                 Confirmar recepción
@@ -620,33 +595,121 @@ export default function ReceivePage() {
             </div>
           )}
 
-          {/* Reception confirmation */}
-          {confirming && (
-            <div className="mt-3 rounded-xl border border-slate-300 bg-slate-50 p-4">
-              <p className="text-sm font-semibold text-slate-800 mb-1">¿Confirmar recepción?</p>
-              <p className="text-xs text-slate-500 mb-3">
-                {locMeta(selected?.origin_id || '').name} → {locMeta(selected?.dest_id || '').name} · {lines.filter(l => l.qty > 0).length} SKUs · {totalQty} unidades.
-                <br />Esto creará el picking en Odoo como <span className="font-mono bg-slate-200 rounded px-1">done</span>.
-              </p>
-              <div className="flex items-center gap-2">
-                <button
-                  disabled={busy}
-                  onClick={confirmReceive}
-                  className="rounded-lg bg-black text-white px-4 py-2 text-sm font-medium hover:bg-slate-800 disabled:opacity-50"
-                >
-                  {busy ? 'Confirmando…' : 'Sí, confirmar'}
-                </button>
-                <button
-                  disabled={busy}
-                  onClick={() => setConfirming(false)}
-                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm hover:bg-white disabled:opacity-50"
-                >
-                  Cancelar
-                </button>
+      {/* Modal de confirmación / resultado */}
+      {confirming && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          onClick={() => { if (!busy) closeModal() }}
+        >
+          <div
+            className="relative max-w-md w-full mx-4 rounded-2xl bg-white shadow-xl p-6"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Estado A: Confirmar */}
+            {!busy && !result && (
+              <>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold text-slate-900">Confirmar recepción</h2>
+                  <button onClick={closeModal} className="text-slate-400 hover:text-slate-600">
+                    <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 text-sm mb-4">
+                  {selected?.origin_id && <LocationLabel code={selected.origin_id} />}
+                  <span className="text-slate-400">→</span>
+                  {selected?.dest_id && <LocationLabel code={selected.dest_id} />}
+                </div>
+                <div className="flex items-center gap-4 text-sm text-slate-600 mb-2">
+                  <span className="flex items-center gap-1.5">
+                    <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" /><path strokeLinecap="round" strokeLinejoin="round" d="M6 6h.008v.008H6V6z" /></svg>
+                    {lines.filter(l => l.qty > 0).length} SKUs
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" /></svg>
+                    {totalQty} unidades
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mb-4">
+                  Esto creará el picking en Odoo como <span className="font-mono bg-slate-200 rounded px-1">done</span>.
+                </p>
+                <div className="flex items-center gap-2">
+                  <button onClick={confirmReceive} className="flex-1 rounded-lg bg-black text-white px-4 py-2.5 text-sm font-medium">
+                    Confirmar recepción
+                  </button>
+                  <button onClick={closeModal} className="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium hover:bg-slate-50">
+                    Cancelar
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Estado B: Confirmando */}
+            {busy && (
+              <div className="flex flex-col items-center py-8 gap-4">
+                <div className="h-10 w-10 animate-spin rounded-full border-[3px] border-slate-200 border-t-slate-600" />
+                <p className="text-sm text-slate-600 font-medium">Confirmando recepción…</p>
               </div>
-            </div>
-          )}
-        </>
+            )}
+
+            {/* Estado C: Resultado */}
+            {!busy && result && (
+              <>
+                {result.ok ? (
+                  <div className="flex flex-col items-center py-4 gap-3">
+                    <div className="h-12 w-12 rounded-full bg-green-100 flex items-center justify-center">
+                      <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+                    </div>
+                    <h3 className="text-lg font-semibold text-slate-900">Recepción confirmada</h3>
+                    <div className="w-full space-y-1.5">
+                      {result.pickingName && (
+                        <a
+                          href={`https://aromantemx.odoo.com/odoo/action-380/${result.pickingId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2.5 text-sm hover:bg-slate-100 transition-colors group"
+                        >
+                          <span className="text-slate-500 text-xs">Odoo</span>
+                          <span className="flex items-center gap-1.5">
+                            <span className="font-mono font-medium text-slate-800">{result.pickingName}</span>
+                            <svg className="h-3.5 w-3.5 text-slate-400 group-hover:text-slate-600" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
+                          </span>
+                        </a>
+                      )}
+                      {result.shopifyTransferId && (
+                        <a
+                          href={`https://admin.shopify.com/store/aromante-4957/transfers/${result.shopifyTransferId.split('/').pop()}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2.5 text-sm hover:bg-slate-100 transition-colors group"
+                        >
+                          <span className="text-slate-500 text-xs">Shopify</span>
+                          <span className="flex items-center gap-1.5">
+                            <span className="font-mono font-medium text-slate-800">#{result.shopifyTransferId.split('/').pop()}</span>
+                            <svg className="h-3.5 w-3.5 text-slate-400 group-hover:text-slate-600" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
+                          </span>
+                        </a>
+                      )}
+                    </div>
+                    <button onClick={closeModal} className="mt-2 w-full rounded-lg bg-black text-white px-4 py-2.5 text-sm font-medium">
+                      Aceptar
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center py-4 gap-3">
+                    <div className="h-12 w-12 rounded-full bg-red-100 flex items-center justify-center">
+                      <svg className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                    </div>
+                    <h3 className="text-lg font-semibold text-slate-900">Error</h3>
+                    <p className="text-sm text-slate-600 text-center">{result.error}</p>
+                    <button onClick={closeModal} className="mt-2 w-full rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-medium hover:bg-slate-50">
+                      Cerrar
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   )

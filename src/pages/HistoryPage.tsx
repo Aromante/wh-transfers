@@ -1,12 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { getUserId } from '../lib/user'
 import useLocations from '../hooks/useLocations'
 import LocationSelect, { LocationLabel, locMeta } from '../components/LocationSelect'
-
-function ep() {
-  const base = (import.meta as any).env?.VITE_API_BASE || ''
-  return String(base || '').replace(/\/$/, '') || '/api/transfers'
-}
+import { ep, apiHeaders } from '../lib/api'
 
 type Line = {
   id?: string
@@ -124,8 +119,8 @@ export default function HistoryPage() {
       setLoading(true)
       setError(null)
       try {
-        const r = await fetch(`${ep()}/history?${qs}`, {
-          headers: { 'X-User-Id': getUserId() },
+        const r = await fetch(ep(`/history?${qs}`), {
+          headers: apiHeaders(),
           signal: ctrl.signal,
         })
         const json = await r.json()
@@ -159,14 +154,14 @@ export default function HistoryPage() {
 
   const downloadCsv = () => {
     const csvQs = qs.replace(/limit=\d+/, 'limit=500').replace(/offset=\d+/, 'offset=0')
-    window.open(`${ep()}/history/csv?${csvQs}`, '_blank')
+    window.open(ep(`/history/csv?${csvQs}`), '_blank')
   }
 
   const duplicate = async (id: string) => {
     try {
-      const r = await fetch(`${ep()}/duplicate`, {
+      const r = await fetch(ep('/duplicate'), {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'X-User-Id': getUserId() },
+        headers: apiHeaders({ 'content-type': 'application/json' }),
         body: JSON.stringify({ transfer_id: id }),
       })
       const data = await r.json()
@@ -188,8 +183,8 @@ export default function HistoryPage() {
 
     setLoadingLines(row.transfer_id)
     try {
-      const r = await fetch(`${ep()}/transfer?id=${encodeURIComponent(row.transfer_id)}`, {
-        headers: { 'X-User-Id': getUserId() },
+      const r = await fetch(ep(`/transfer?id=${encodeURIComponent(row.transfer_id)}`), {
+        headers: apiHeaders(),
       })
       const json = await r.json()
       const meta = json?.data || json

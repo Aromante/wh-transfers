@@ -1,10 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getUserId } from '../lib/user'
-
-function efBase() {
-  const base = (import.meta as any).env?.VITE_API_BASE || ''
-  return String(base || '').replace(/\/$/, '')
-}
+import { ep, apiHeaders } from '../lib/api'
 
 export type DraftItem = {
   id: string
@@ -25,11 +20,7 @@ export default function useDrafts() {
   const refresh = useCallback(async () => {
     setLoading(true); setError(null)
     try {
-      const base = efBase()
-      const url = base
-        ? `${base}/drafts?limit=3`
-        : `/api/transfers/drafts?limit=3`
-      const r = await fetch(url, { headers: { 'X-User-Id': getUserId() } })
+      const r = await fetch(ep('/drafts?limit=3'), { headers: apiHeaders() })
       const json = await r.json()
       if (!r.ok) throw new Error(json?.error || 'fetch_failed')
       // EF returns { data: [...] }; fallback also handles legacy { drafts: [...] }
