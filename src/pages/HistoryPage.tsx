@@ -88,6 +88,26 @@ export default function HistoryPage() {
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState<string | null>(null)
 
+  // Box catalog: barcode → qty_per_box (loaded once for CSV export)
+  const [boxCatalog, setBoxCatalog] = useState<Record<string, number>>({})
+  const boxCatalogLoaded = useRef(false)
+
+  const ensureBoxCatalog = async (): Promise<Record<string, number>> => {
+    if (boxCatalogLoaded.current) return boxCatalog
+    try {
+      const r = await fetch(ep('/boxes'), { headers: apiHeaders() })
+      const json = await r.json()
+      const boxes: Array<{ barcode: string; qty_per_box: number }> = json?.data || json || []
+      const map: Record<string, number> = {}
+      for (const b of boxes) map[b.barcode] = b.qty_per_box
+      setBoxCatalog(map)
+      boxCatalogLoaded.current = true
+      return map
+    } catch {
+      return boxCatalog
+    }
+  }
+
   // Lines loaded per transfer id
   const [linesMap, setLinesMap] = useState<Record<string, Line[]>>({})
   const [loadingLines, setLoadingLines] = useState<string | null>(null)
@@ -155,6 +175,60 @@ export default function HistoryPage() {
   const downloadCsv = () => {
     const csvQs = qs.replace(/limit=\d+/, 'limit=500').replace(/offset=\d+/, 'offset=0')
     window.open(ep(`/history/csv?${csvQs}`), '_blank')
+  }
+
+  const exportTransferCsv = async (row: Row) => {
+    let lines = linesMap[row.transfer_id]
+    if (!lines) {
+      try {
+        const r = await fetch(ep(`/transfer?id=${encodeURIComponent(row.transfer_id)}`), {
+          headers: apiHeaders(),
+        })
+        const json = await r.json()
+        const meta = json?.data || json
+        lines = Array.isArray(meta?.lines) ? meta.lines : []
+        setLinesMap(prev => ({ ...prev, [row.transfer_id]: lines! }))
+      } catch {
+        alert('No se pudieron cargar las líneas para exportar')
+        return
+      }
+    }
+    if (!lines || lines.length === 0) {
+      alert('Esta transferencia no tiene líneas para exportar')
+      return
+    }
+
+    const boxes = await ensureBoxCatalog()
+
+    // Expand each line into individual box rows
+    const header = 'Producto (SKU),Cantidad,Tarima'
+    const csvRows: string[] = []
+    for (const ln of lines) {
+      const sku = ln.sku || ln.barcode || ''
+      const qtyPerBox = ln.box_barcode ? boxes[ln.box_barcode] : null
+      if (qtyPerBox && qtyPerBox > 0) {
+        const numBoxes = Math.round(ln.qty / qtyPerBox)
+        for (let i = 0; i < numBoxes; i++) {
+          csvRows.push(`${sku},${qtyPerBox},1`)
+        }
+        // Remainder (partial box)
+        const remainder = ln.qty - numBoxes * qtyPerBox
+        if (remainder > 0) {
+          csvRows.push(`${sku},${remainder},1`)
+        }
+      } else {
+        // No box info — single row with total qty
+        csvRows.push(`${sku},${ln.qty},1`)
+      }
+    }
+    const csv = [header, ...csvRows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `transferencia-${folio(row.transfer_id)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   const duplicate = async (id: string) => {
@@ -395,7 +469,17 @@ export default function HistoryPage() {
                       </td>
 
                       {/* Actions */}
-                      <td className="px-3 py-2.5 text-right">
+                      <td className="px-3 py-2.5 text-right space-x-1.5">
+                        <button
+                          onClick={() => exportTransferCsv(row)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 text-slate-600"
+                          title="Exportar CSV"
+                        >
+                          <svg className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
+                          </svg>
+                          CSV
+                        </button>
                         <button
                           onClick={() => duplicate(row.transfer_id)}
                           className="inline-flex items-center rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 text-slate-600"
