@@ -33,7 +33,10 @@ type Row = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtDate(iso: string) {
-  return new Date(iso).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })
+  const d = new Date(iso)
+  const day = d.toLocaleDateString('es-MX', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
+  const time = d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
+  return { day, time }
 }
 
 function folio(id: string) {
@@ -232,21 +235,6 @@ export default function HistoryPage() {
     URL.revokeObjectURL(url)
   }
 
-  const duplicate = async (id: string) => {
-    try {
-      const r = await fetch(ep('/duplicate'), {
-        method: 'POST',
-        headers: apiHeaders({ 'content-type': 'application/json' }),
-        body: JSON.stringify({ transfer_id: id }),
-      })
-      const data = await r.json()
-      if (!r.ok) throw new Error(data?.error || r.status)
-      alert('Borrador creado a partir del historial')
-    } catch (e: any) {
-      alert(`No se pudo duplicar: ${String(e?.message || e)}`)
-    }
-  }
-
   // Lazy-load lines for a row via /transfer?id=
   const toggleExpand = async (row: Row) => {
     const newState = !expanded[row.transfer_id]
@@ -443,7 +431,8 @@ export default function HistoryPage() {
 
                       {/* Date */}
                       <td className="px-3 py-2.5 text-xs text-slate-600 whitespace-nowrap">
-                        {fmtDate(row.created_at)}
+                        <div>{fmtDate(row.created_at).day}</div>
+                        <div className="text-slate-400">{fmtDate(row.created_at).time}</div>
                       </td>
 
                       {/* Origin */}
@@ -506,13 +495,6 @@ export default function HistoryPage() {
                             <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
                           </svg>
                           CSV
-                        </button>
-                        <button
-                          onClick={() => duplicate(row.transfer_id)}
-                          className="inline-flex items-center rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 text-slate-600"
-                          title="Duplicar como borrador"
-                        >
-                          Duplicar
                         </button>
                       </td>
                     </tr>
