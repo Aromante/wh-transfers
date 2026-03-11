@@ -1,0 +1,624 @@
+// Route handlers for transfer creation and reception
+// FLOW:
+//   POST /  → handleCreateTransfer  → inserts lines to transfer_lines with status='pending'
+//                                      KRONI: also creates Odoo picking + Shopify adjustment at create time
+//   POST /receive → handleReceiveTransfer → creates Odoo picking, syncs Shopify, status='validated'
+//                                           KRONI (fast path): if Odoo already done at create, just flips status
+
+// Odoo location ID for "Traslado interno a Kroni"
+// (Physical Locations/Inter-warehouse transit/Traslado interno a Kroni)
+// Source: Odoo stock.location id=43 — update here if the location is ever recreated in Odoo
+const KRONI_TRANSIT_LOC_ID = 43
+
+import { type Env, getOwner, gidToLegacyId } from './helpers.ts'
+import { createOdooPickingFromLines, findProductsByCodes, getStockAtLocation } from './odoo.ts'
+import { syncShopifyTransfer, adjustShopifyPlantaInventory, resolveVariantsBatch } from './shopify.ts'
+import {
+    sbInsert,
+    sbGetLocation, sbGetTransferById,
+    sbUpdateTransferById, sbLogTransfer, resolveBox,
+} from './supabase-helpers.ts'
+
+// ── POST / — Create transfer order (pending, no Odoo yet) ─────────────────────
+// The frontend generates transfer_id (UUID) before sending — duplicate requests
+// will fail on PK conflict and return the existing record (idempotent).
+export async function handleCreateTransfer(req: Request, env: Env) {
+    const body = await req.json()
+    const { transfer_id: clientTransferId, origin_id, dest_id, lines } = body as any
+    if (!origin_id || !dest_id || !Array.isArray(lines) || !lines.length)
+        return { error: 'origin_id, dest_id y lines son requeridos', status: 400 }
+
+    // Use client-provided transfer_id for idempotency, or generate one
+    const transferId: string = clientTransferId || crypto.randomUUID()
+
+    // Validate locations
+    const [originLoc, destLoc] = await Promise.all([
+        sbGetLocation(env, origin_id),
+        sbGetLocation(env, dest_id),
+    ])
+    if (!originLoc) return { error: `Ubicación de origen no encontrada: ${origin_id}`, status: 400 }
+    if (!destLoc) return { error: `Ubicación de destino no encontrada: ${dest_id}`, status: 400 }
+    if (!originLoc.can_be_origin) return { error: `${origin_id} no puede ser origen`, status: 400 }
+    if (!destLoc.can_be_destination) return { error: `${dest_id} no puede ser destino`, status: 400 }
+
+    // Expand box barcodes and resolve product names from Odoo
+    const expandedLines: Array<{ sku: string; qty: number; product_name: string | null; box_barcode?: string }> = []
+    for (const ln of lines) {
+        const rawBarcode = String(ln.code || ln.barcode || ln.sku || '').trim()
+        const qty = Number(ln.qty || 1)
+        const box = await resolveBox(env, rawBarcode)
+        if (box) {
+            expandedLines.push({
+                sku: box.sku,
+                qty: box.qty_per_box * qty,
+                product_name: box.product_name || box.label || null,
+                box_barcode: rawBarcode,
+            })
+        } else {
+            expandedLines.push({
+                sku: rawBarcode,
+                qty,
+                product_name: ln.product_name || null, // caller may pass it from /resolve
+                box_barcode: undefined,
+            })
+        }
+    }
+
+    // ── Stock availability check (Odoo stock.quant) ──────────────────────────
+    const requestedBySku = new Map<string, number>()
+    for (const ln of expandedLines) {
+        requestedBySku.set(ln.sku, (requestedBySku.get(ln.sku) || 0) + ln.qty)
+    }
+
+    // Resolve product names from Odoo for any lines that don't already have one
+    let prodMap: Map<string, { id: number; name: string; shopify_inventory_item_id: number | null }> = new Map()
+    let stockCheckWarning: string | null = null
+    try {
+        const skus = [...requestedBySku.keys()]
+        const resolvedProdMap = await findProductsByCodes(env, skus)
+        const originLocId = originLoc.odoo_id
+        prodMap = resolvedProdMap
+
+        // Fill in product_name for lines that don't have one
+        for (const ln of expandedLines) {
+            if (!ln.product_name) {
+                const prod = prodMap.get(ln.sku)
+                if (prod?.name) ln.product_name = prod.name
+            }
+        }
+
+        const productIds = skus.map(s => prodMap.get(s)?.id).filter((id): id is number => id != null)
+        const stockMap = await getStockAtLocation(env, productIds, originLocId)
+
+        const prodIdToSku = new Map<number, string>()
+        for (const sku of skus) {
+            const prod = prodMap.get(sku)
+            if (prod && !prodIdToSku.has(prod.id)) prodIdToSku.set(prod.id, sku)
+        }
+
+        const insufficient: Array<{ code: string; requested: number; available: number }> = []
+        for (const [prodId, available] of stockMap) {
+            const sku = prodIdToSku.get(prodId)
+            if (!sku) continue
+            const requested = requestedBySku.get(sku) || 0
+            if (requested > available) {
+                insufficient.push({ code: sku, requested, available })
+            }
+        }
+        // Flag SKUs with no quant record at all (available = 0)
+        for (const sku of skus) {
+            const prod = prodMap.get(sku)
+            if (!prod) continue
+            if (!stockMap.has(prod.id)) {
+                const requested = requestedBySku.get(sku) || 0
+                if (requested > 0) insufficient.push({ code: sku, requested, available: 0 })
+            }
+        }
+
+        if (insufficient.length > 0) {
+            return {
+                status: 409,
+                data: { kind: 'insufficient', origin: origin_id, insufficient, error: 'Stock insuficiente en origen' },
+            }
+        }
+    } catch (e: any) {
+        // Stock check failure is non-blocking — log and continue (Odoo may be unreachable)
+        stockCheckWarning = `Stock check failed: ${e?.message || e}`
+        console.error('Stock check failed (non-blocking):', e?.message || e)
+    }
+
+    // ── Single INSERT to transfer_lines — all header columns per line ──────────
+    // This is the only write. transfer_summary VIEW derives everything from here.
+    const now = new Date().toISOString()
+    const toInsert = expandedLines.map(ln => ({
+        transfer_id: transferId,
+        origin_id,
+        dest_id,
+        origin_odoo_id: originLoc.odoo_id ?? null,
+        dest_odoo_id: destLoc.odoo_id ?? null,
+        origin_shopify_id: originLoc.shopify_id ?? null,
+        dest_shopify_id: destLoc.shopify_id ?? null,
+        status: 'pending',
+        odoo_transfer_id: null,
+        shopify_transfer_id: null,
+        sku: ln.sku,
+        qty: ln.qty,
+        product_name: ln.product_name || null,
+        box_barcode: ln.box_barcode || null,
+        created_at: now,
+    }))
+
+    try {
+        await sbInsert(env, 'transfer_lines', toInsert)
+    } catch (e: any) {
+        const msg = String(e?.message || '')
+        // PK conflict → duplicate request, return existing record
+        if (msg.includes('duplicate') || msg.includes('unique')) {
+            const existing = await sbGetTransferById(env, transferId)
+            if (existing) return { data: { transfer: existing, duplicate: true } }
+        }
+        throw e
+    }
+
+    await sbLogTransfer(env, transferId, 'transfer_created', {
+        origin_id,
+        dest_id,
+        lines: expandedLines.length,
+        total_qty: expandedLines.reduce((a, b) => a + b.qty, 0),
+    })
+
+    // ── KRONI early sync: move inventory at CREATE time ──────────────────────
+    // KRONI shipments take 3-4 business days. Without early sync, Planta shows
+    // ghost inventory during transit. We create the Odoo picking and adjust
+    // Shopify now; /receive will only flip status to 'validated'.
+    let kroniEarlySync: { pickingName?: string; pickingId?: number; shopifyAdjusted?: boolean; error?: string } | undefined
+    if (dest_id === 'KRONI/Existencias') {
+        kroniEarlySync = {}
+        const linesBySku = new Map<string, number>()
+        for (const ln of expandedLines) {
+            linesBySku.set(ln.sku, (linesBySku.get(ln.sku) || 0) + ln.qty)
+        }
+
+        // 1. Create Odoo picking (origin → KRONI transit loc 43)
+        try {
+            const result = await createOdooPickingFromLines(
+                env,
+                origin_id,
+                dest_id,
+                linesBySku,
+                `transfer/${transferId}`,
+                transferId,
+                sbLogTransfer,
+                originLoc.odoo_id,
+                KRONI_TRANSIT_LOC_ID,
+            )
+            kroniEarlySync.pickingName = result.pickingName
+            kroniEarlySync.pickingId = result.pickingId
+
+            // Persist odoo_transfer_id (keep status='pending')
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    await sbUpdateTransferById(env, transferId, { odoo_transfer_id: result.pickingName })
+                    break
+                } catch (e: any) {
+                    if (attempt === 3) {
+                        await sbLogTransfer(env, transferId, 'kroni_early_db_update_failed', {
+                            error: e?.message, pickingName: result.pickingName, attempt,
+                        })
+                    }
+                }
+            }
+        } catch (e: any) {
+            kroniEarlySync.error = `Odoo: ${e?.message || e}`
+            await sbLogTransfer(env, transferId, 'kroni_early_odoo_error', { error: e?.message || e })
+        }
+
+        // 2. Shopify: adjust Planta inventory (negate)
+        try {
+            const itemQtyMap = new Map<number, number>()
+            for (const [sku, qty] of requestedBySku) {
+                const prod = prodMap.get(sku)
+                if (prod?.shopify_inventory_item_id) {
+                    itemQtyMap.set(
+                        prod.shopify_inventory_item_id,
+                        (itemQtyMap.get(prod.shopify_inventory_item_id) || 0) + qty,
+                    )
+                }
+            }
+            // Fallback: resolve from Shopify if Odoo doesn't have item IDs
+            if (itemQtyMap.size === 0 && requestedBySku.size > 0) {
+                try {
+                    const shopifyVariants = await resolveVariantsBatch(env, [...requestedBySku.keys()])
+                    for (const [sku, qty] of requestedBySku) {
+                        const variant = shopifyVariants.get(sku)
+                        const itemGid: string | undefined = variant?.inventoryItem?.id
+                        if (itemGid) {
+                            const numericId = Number(gidToLegacyId(itemGid))
+                            if (numericId) {
+                                itemQtyMap.set(numericId, (itemQtyMap.get(numericId) || 0) + qty)
+                            }
+                        }
+                    }
+                } catch (fallbackErr: any) {
+                    await sbLogTransfer(env, transferId, 'kroni_early_shopify_fallback_error', {
+                        error: String(fallbackErr?.message || fallbackErr),
+                    })
+                }
+            }
+
+            if (itemQtyMap.size > 0) {
+                await adjustShopifyPlantaInventory(
+                    env,
+                    itemQtyMap,
+                    (event, data) => sbLogTransfer(env, transferId, event, data),
+                    true, // negate → subtract from Planta
+                )
+                kroniEarlySync.shopifyAdjusted = true
+
+                // Persist marker (keep status='pending')
+                for (let attempt = 1; attempt <= 3; attempt++) {
+                    try {
+                        await sbUpdateTransferById(env, transferId, { shopify_transfer_id: 'planta_adjusted' })
+                        break
+                    } catch (e: any) {
+                        if (attempt === 3) {
+                            await sbLogTransfer(env, transferId, 'kroni_early_shopify_db_failed', {
+                                error: e?.message, attempt,
+                            })
+                        }
+                    }
+                }
+            }
+        } catch (e: any) {
+            kroniEarlySync.shopifyAdjusted = false
+            if (!kroniEarlySync.error) kroniEarlySync.error = `Shopify: ${e?.message || e}`
+            await sbLogTransfer(env, transferId, 'kroni_early_shopify_error', { error: e?.message || e })
+        }
+
+        await sbLogTransfer(env, transferId, 'kroni_early_sync_result', kroniEarlySync)
+    }
+
+    return {
+        data: {
+            transfer: {
+                transfer_id: transferId,
+                status: 'pending',
+                origin_id,
+                dest_id,
+                lines: expandedLines.length,
+                total_qty: expandedLines.reduce((a, b) => a + b.qty, 0),
+                ...(kroniEarlySync?.pickingName ? { odoo_transfer_id: kroniEarlySync.pickingName } : {}),
+            },
+            ...(kroniEarlySync ? { kroni_early_sync: kroniEarlySync } : {}),
+            ...(stockCheckWarning ? { warning: stockCheckWarning } : {}),
+            message: kroniEarlySync?.pickingName
+                ? `Orden de transferencia creada. Inventario ajustado en Odoo (${kroniEarlySync.pickingName}) y Shopify.`
+                : 'Orden de transferencia creada. Pendiente de recepción en destino.',
+        },
+    }
+}
+
+// ── POST /receive — Confirm reception with final quantities → create Odoo picking ──
+// Called by the receiver at the destination. Lines may differ from original order:
+// - quantities can be adjusted (partial receipt)
+// - lines can be added (extra items received)
+// - lines can be omitted (items not received)
+export async function handleReceiveTransfer(req: Request, env: Env) {
+    const body = await req.json()
+    const { transfer_id, lines } = body as any
+
+    if (!transfer_id) return { error: 'transfer_id requerido', status: 400 }
+    if (!Array.isArray(lines) || !lines.length) return { error: 'lines requerido con al menos un item', status: 400 }
+
+    // Load transfer from summary view
+    const t = await sbGetTransferById(env, transfer_id)
+    if (!t) return { error: 'Transfer no encontrado', status: 404 }
+    if (t.status === 'validated') return { error: 'Este transfer ya fue recibido', status: 400 }
+    if (t.status === 'cancelled') return { error: 'Este transfer fue cancelado', status: 400 }
+
+    // Build final lines map: sku → qty (from receiver's input)
+    const linesBySku = new Map<string, number>()
+    for (const ln of lines) {
+        const code = String(ln.sku || ln.barcode || ln.code || '').trim()
+        const qty = Number(ln.qty || 0)
+        if (!code || qty <= 0) continue
+        linesBySku.set(code, (linesBySku.get(code) || 0) + qty)
+    }
+
+    if (linesBySku.size === 0) return { error: 'No hay cantidades válidas en las líneas', status: 400 }
+
+    // ── Quantity validation — compare received vs original ──────────────────
+    const discrepancies: Array<{ sku: string; original: number; received: number }> = []
+    if (t.lines && Array.isArray(t.lines)) {
+        const originalBySku = new Map<string, number>()
+        for (const ln of t.lines) {
+            originalBySku.set(ln.sku, (originalBySku.get(ln.sku) || 0) + ln.qty)
+        }
+        // Check differences
+        const allSkus = new Set([...originalBySku.keys(), ...linesBySku.keys()])
+        for (const sku of allSkus) {
+            const orig = originalBySku.get(sku) || 0
+            const recv = linesBySku.get(sku) || 0
+            if (orig !== recv) {
+                discrepancies.push({ sku, original: orig, received: recv })
+            }
+        }
+        if (discrepancies.length > 0) {
+            await sbLogTransfer(env, transfer_id, 'receive_discrepancies', { discrepancies })
+        }
+    }
+
+    // ── KRONI special case ─────────────────────────────────────────────────────
+    const isKroni = t.dest_id === 'KRONI/Existencias'
+
+    // ── KRONI fast path: Odoo already created at transfer time ──────────────
+    if (isKroni && t.odoo_transfer_id) {
+        // Shopify retry if not done at create time
+        if (t.shopify_transfer_id !== 'planta_adjusted') {
+            try {
+                const skus = [...linesBySku.keys()]
+                const kroniProdMap = await findProductsByCodes(env, skus)
+                const itemQtyMap = new Map<number, number>()
+                for (const [sku, qty] of linesBySku) {
+                    const prod = kroniProdMap.get(sku)
+                    if (prod?.shopify_inventory_item_id) {
+                        itemQtyMap.set(
+                            prod.shopify_inventory_item_id,
+                            (itemQtyMap.get(prod.shopify_inventory_item_id) || 0) + qty,
+                        )
+                    }
+                }
+                if (itemQtyMap.size === 0 && linesBySku.size > 0) {
+                    const shopifyVariants = await resolveVariantsBatch(env, [...linesBySku.keys()])
+                    for (const [sku, qty] of linesBySku) {
+                        const variant = shopifyVariants.get(sku)
+                        const itemGid: string | undefined = variant?.inventoryItem?.id
+                        if (itemGid) {
+                            const numericId = Number(gidToLegacyId(itemGid))
+                            if (numericId) itemQtyMap.set(numericId, (itemQtyMap.get(numericId) || 0) + qty)
+                        }
+                    }
+                }
+                if (itemQtyMap.size > 0) {
+                    await adjustShopifyPlantaInventory(
+                        env, itemQtyMap,
+                        (event, data) => sbLogTransfer(env, transfer_id, event, data),
+                        true,
+                    )
+                    await sbUpdateTransferById(env, transfer_id, { shopify_transfer_id: 'planta_adjusted' })
+                        .catch(e => console.error('Persist shopify on receive failed:', e?.message || e))
+                }
+            } catch (e: any) {
+                await sbLogTransfer(env, transfer_id, 'kroni_receive_shopify_retry_error', { error: e?.message || e })
+            }
+        }
+
+        // Flip status to validated (retry x3)
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                await sbUpdateTransferById(env, transfer_id, { status: 'validated' })
+                break
+            } catch (e: any) {
+                if (attempt === 3) {
+                    await sbLogTransfer(env, transfer_id, 'kroni_receive_db_failed', { error: e?.message, attempt })
+                    return { error: `Failed to update status: ${e?.message}`, status: 500 }
+                }
+            }
+        }
+
+        if (discrepancies.length > 0) {
+            await sbLogTransfer(env, transfer_id, 'kroni_receive_discrepancies_info', {
+                note: 'Discrepancies logged for info only — Odoo picking was created at transfer time with original quantities',
+                discrepancies,
+            })
+        }
+
+        await sbLogTransfer(env, transfer_id, 'transfer_received', {
+            pickingName: t.odoo_transfer_id,
+            fast_path: true,
+            received_lines: linesBySku.size,
+            total_qty: [...linesBySku.values()].reduce((a, b) => a + b, 0),
+        })
+
+        return {
+            data: {
+                transfer_id,
+                picking_name: t.odoo_transfer_id,
+                state: 'done',
+                fast_path: true,
+                shopify: { synced: linesBySku.size, skipped: 0 },
+                ...(discrepancies.length > 0 ? { discrepancies } : {}),
+                message: `Transfer KRONI recibido (picking ${t.odoo_transfer_id} ya existía).`,
+            },
+        }
+    }
+
+    // Create Odoo picking as done with FINAL received quantities
+    let pickingId: number
+    let pickingName: string
+    let finalState: string
+
+    try {
+        const result = await createOdooPickingFromLines(
+            env,
+            t.origin_id,
+            t.dest_id,
+            linesBySku,
+            `transfer/${transfer_id}`,
+            transfer_id,
+            sbLogTransfer,
+            t.origin_odoo_id ?? undefined,
+            isKroni ? KRONI_TRANSIT_LOC_ID : (t.dest_odoo_id ?? undefined),
+        )
+        pickingId = result.pickingId
+        pickingName = result.pickingName
+        finalState = result.finalState
+    } catch (e: any) {
+        await sbLogTransfer(env, transfer_id, 'odoo_error', { error: (e as Error).message })
+        return { error: `Error creando picking en Odoo: ${(e as Error).message}`, status: 500 }
+    }
+
+    // ── Odoo↔DB atomicity: persist picking info with retry ──────────────────
+    let dbUpdateOk = false
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            await sbUpdateTransferById(env, transfer_id, {
+                odoo_transfer_id: pickingName,
+                status: 'validated',
+            })
+            dbUpdateOk = true
+            break
+        } catch (e: any) {
+            if (attempt === 3) {
+                await sbLogTransfer(env, transfer_id, 'db_update_failed', {
+                    error: e?.message,
+                    pickingId,
+                    pickingName,
+                    attempt,
+                })
+                return {
+                    error: `Picking ${pickingName} creado en Odoo pero falló actualizar DB. Picking ID: ${pickingId}`,
+                    status: 500,
+                    data: { pickingId, pickingName },
+                }
+            }
+        }
+    }
+
+    // ── Shopify inventory sync (AWAITED) ─────────────────────────────────────
+    let shopifyResult: { synced: number; skipped: number; error?: string; transferGid?: string } = { synced: 0, skipped: 0 }
+    try {
+        const skus = [...linesBySku.keys()]
+        const prodMap = await findProductsByCodes(env, skus)
+        const itemQtyMap = new Map<number, number>()
+        for (const [sku, qty] of linesBySku) {
+            const prod = prodMap.get(sku)
+            if (prod?.shopify_inventory_item_id) {
+                itemQtyMap.set(
+                    prod.shopify_inventory_item_id,
+                    (itemQtyMap.get(prod.shopify_inventory_item_id) || 0) + qty,
+                )
+            }
+        }
+        // Fallback: if Odoo x_shopify_inventory_item_id is not populated,
+        // resolve inventory item IDs directly from Shopify by SKU/barcode
+        if (itemQtyMap.size === 0 && linesBySku.size > 0) {
+            const missingSkus = [...linesBySku.keys()].filter(sku => !prodMap.get(sku)?.shopify_inventory_item_id)
+            await sbLogTransfer(env, transfer_id, 'shopify_item_lookup_fallback', {
+                reason: 'odoo_shopify_item_ids_missing',
+                missing_skus: missingSkus,
+            })
+            try {
+                const shopifyVariants = await resolveVariantsBatch(env, [...linesBySku.keys()])
+                for (const [sku, qty] of linesBySku) {
+                    const variant = shopifyVariants.get(sku)
+                    const itemGid: string | undefined = variant?.inventoryItem?.id
+                    if (itemGid) {
+                        const numericId = Number(gidToLegacyId(itemGid))
+                        if (numericId) {
+                            itemQtyMap.set(numericId, (itemQtyMap.get(numericId) || 0) + qty)
+                        }
+                    }
+                }
+            } catch (fallbackErr: any) {
+                await sbLogTransfer(env, transfer_id, 'shopify_item_lookup_fallback_error', {
+                    error: String(fallbackErr?.message || fallbackErr),
+                })
+            }
+        }
+
+        if (itemQtyMap.size > 0) {
+            if (isKroni) {
+                // KRONI: only subtract from Planta Productora, do NOT create a Shopify transfer
+                await adjustShopifyPlantaInventory(
+                    env,
+                    itemQtyMap,
+                    (event, data) => sbLogTransfer(env, transfer_id, event, data),
+                    true, // negate=true → delta negativo (restamos de Planta)
+                )
+                shopifyResult = { synced: itemQtyMap.size, skipped: 0 }
+            } else {
+                // Normal flow: full 5-step Shopify inventory transfer
+                const result = await syncShopifyTransfer(
+                    env,
+                    t.origin_id,
+                    t.dest_id,
+                    itemQtyMap,
+                    async (event, data) => {
+                        await sbLogTransfer(env, transfer_id, event, data)
+                        // Capture the Shopify transfer GID as soon as it's created
+                        if (event === 'shopify_transfer_created' && data?.transferGid) {
+                            sbUpdateTransferById(env, transfer_id, { shopify_transfer_id: data.transferGid })
+                                .catch(e => console.error('Persist shopify_transfer_id failed:', e?.message || e))
+                        }
+                    },
+                    transfer_id,
+                )
+                shopifyResult = { synced: result.synced, skipped: result.skipped, transferGid: result.transferGid }
+            }
+        }
+    } catch (e: any) {
+        console.error('Shopify sync failed:', e?.message || e)
+        await sbLogTransfer(env, transfer_id, 'shopify_sync_error', { error: (e as Error).message })
+        shopifyResult = { synced: 0, skipped: 0, error: e?.message || String(e) }
+    }
+
+    await sbLogTransfer(env, transfer_id, 'transfer_received', {
+        pickingId,
+        pickingName,
+        state: finalState,
+        received_lines: linesBySku.size,
+        total_qty: [...linesBySku.values()].reduce((a, b) => a + b, 0),
+        shopify: shopifyResult,
+    })
+
+    return {
+        data: {
+            transfer_id,
+            picking_id: pickingId,
+            picking_name: pickingName,
+            state: finalState,
+            shopify: shopifyResult,
+            shopify_transfer_id: shopifyResult.transferGid || null,
+            ...(discrepancies.length > 0 ? { discrepancies } : {}),
+            message: `Picking ${pickingName} creado en Odoo (${finalState}).`,
+        },
+    }
+}
+
+// ── POST /cancel — Cancel a pending transfer (before reception) ───────────────
+export async function handleCancelTransfer(req: Request, env: Env) {
+    const body = await req.json()
+    const { transfer_id } = body as any
+    if (!transfer_id) return { error: 'transfer_id requerido', status: 400 }
+
+    const t = await sbGetTransferById(env, transfer_id)
+    if (!t) return { error: 'Transfer no encontrado', status: 404 }
+    if (t.status === 'validated') return { error: 'No se puede cancelar un transfer ya recibido', status: 400 }
+    if (t.status === 'cancelled') return { error: 'Transfer ya cancelado', status: 400 }
+
+    await sbUpdateTransferById(env, transfer_id, { status: 'cancelled' })
+    await sbLogTransfer(env, transfer_id, 'transfer_cancelled', { by: getOwner(req) })
+
+    // KRONI early-synced: warn that Odoo picking + Shopify adjustment already happened
+    let kroniWarning: string | undefined
+    if (t.dest_id === 'KRONI/Existencias' && t.odoo_transfer_id) {
+        kroniWarning = `⚠ Este transfer KRONI ya tenía picking Odoo (${t.odoo_transfer_id})` +
+            (t.shopify_transfer_id === 'planta_adjusted' ? ' y ajuste Shopify aplicado.' : '.') +
+            ' Puede requerir reversión manual en Odoo/Shopify.'
+        await sbLogTransfer(env, transfer_id, 'kroni_cancel_warning', {
+            odoo_transfer_id: t.odoo_transfer_id,
+            shopify_adjusted: t.shopify_transfer_id === 'planta_adjusted',
+            warning: kroniWarning,
+        })
+    }
+
+    return {
+        data: {
+            transfer_id,
+            status: 'cancelled',
+            message: 'Transfer cancelado.',
+            ...(kroniWarning ? { warning: kroniWarning } : {}),
+        },
+    }
+}

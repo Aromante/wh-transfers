@@ -22,8 +22,9 @@ type Row = {
   status: string
   draft_owner?: string | null
   draft_title?: string | null
-  picking_name?: string | null
-  odoo_picking_id?: string | null
+  odoo_transfer_id?: string | null
+  odoo_picking_id?: number | null
+  shopify_transfer_id?: string | null
   created_at: string
   updated_at?: string | null
   // embedded by transfer_log view (may be null if view doesn't aggregate them)
@@ -403,7 +404,8 @@ export default function HistoryPage() {
                 <th className="px-3 py-2.5 font-medium hidden sm:table-cell">Origen</th>
                 <th className="px-3 py-2.5 font-medium hidden sm:table-cell">Destino</th>
                 <th className="px-3 py-2.5 font-medium">Estado</th>
-                <th className="px-3 py-2.5 font-medium hidden md:table-cell">Picking</th>
+                <th className="px-3 py-2.5 font-medium hidden md:table-cell">Odoo</th>
+                <th className="px-3 py-2.5 font-medium hidden md:table-cell">Shopify</th>
                 <th className="px-3 py-2.5 font-medium text-right">Acciones</th>
               </tr>
             </thead>
@@ -459,10 +461,35 @@ export default function HistoryPage() {
                         <StatusPill status={row.status} />
                       </td>
 
-                      {/* Picking */}
+                      {/* Odoo */}
                       <td className="px-3 py-2.5 hidden md:table-cell">
-                        {row.picking_name ? (
-                          <span className="font-mono text-xs text-slate-700">{row.picking_name}</span>
+                        {row.odoo_transfer_id && row.odoo_picking_id ? (
+                          <a
+                            href={`https://aromantemx.odoo.com/odoo/action-380/${row.odoo_picking_id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-xs text-purple-700 hover:text-purple-900 underline underline-offset-2"
+                          >
+                            {row.odoo_transfer_id}
+                          </a>
+                        ) : row.odoo_transfer_id ? (
+                          <span className="font-mono text-xs text-slate-700">{row.odoo_transfer_id}</span>
+                        ) : (
+                          <span className="text-xs text-slate-300">—</span>
+                        )}
+                      </td>
+
+                      {/* Shopify */}
+                      <td className="px-3 py-2.5 hidden md:table-cell">
+                        {row.shopify_transfer_id && row.shopify_transfer_id !== 'planta_adjusted' ? (
+                          <a
+                            href={`https://admin.shopify.com/store/aromante-4957/transfers/${row.shopify_transfer_id.split('/').pop()}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-xs text-blue-700 hover:text-blue-900 underline underline-offset-2"
+                          >
+                            #{row.shopify_transfer_id.split('/').pop()}
+                          </a>
                         ) : (
                           <span className="text-xs text-slate-300">—</span>
                         )}
@@ -493,7 +520,7 @@ export default function HistoryPage() {
                     {/* Expanded lines row */}
                     {isExpanded && (
                       <tr className="border-b border-slate-100">
-                        <td colSpan={8} className="px-4 py-3 bg-slate-50/80">
+                        <td colSpan={9} className="px-4 py-3 bg-slate-50/80">
                           {/* Summary chips */}
                           {stats && (
                             <div className="flex items-center gap-2 mb-2 flex-wrap">
