@@ -71,9 +71,14 @@ function StatusPill({ status }: { status: string }) {
   )
 }
 
-function lineStats(lines: Line[]) {
+function lineStats(lines: Line[], boxCatalog?: Record<string, number>) {
   const skus = new Set(lines.map(l => l.sku || l.barcode)).size
-  const boxes = lines.filter(l => !!l.box_barcode).length
+  let boxes = 0
+  for (const l of lines) {
+    if (!l.box_barcode) continue
+    const qpb = boxCatalog?.[l.box_barcode]
+    boxes += (qpb && qpb > 0) ? Math.round(l.qty / qpb) : 1
+  }
   const units = lines.reduce((a, l) => a + (l.qty || 0), 0)
   return { skus, boxes, units }
 }
@@ -111,6 +116,9 @@ export default function HistoryPage() {
       return boxCatalog
     }
   }
+
+  // Load box catalog on mount for accurate box counts
+  useEffect(() => { ensureBoxCatalog() }, [])
 
   // Lines loaded per transfer id
   const [linesMap, setLinesMap] = useState<Record<string, Line[]>>({})
@@ -401,7 +409,7 @@ export default function HistoryPage() {
               {rows.map(row => {
                 const isExpanded = expanded[row.transfer_id]
                 const rowLines = linesMap[row.transfer_id]
-                const stats = rowLines ? lineStats(rowLines) : null
+                const stats = rowLines ? lineStats(rowLines, boxCatalog) : null
 
                 return (
                   <React.Fragment key={row.transfer_id}>

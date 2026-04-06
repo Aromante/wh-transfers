@@ -13,6 +13,7 @@ const KRONI_TRANSIT_LOC_ID = 43
 import { type Env, getOwner, gidToLegacyId } from './helpers.ts'
 import { createOdooPickingFromLines, findProductsByCodes, getStockAtLocation } from './odoo.ts'
 import { syncShopifyTransfer, adjustShopifyPlantaInventory, resolveVariantsBatch } from './shopify.ts'
+import { createKroniReception, type BoxInfo } from './kroni.ts'
 import {
     sbInsert,
     sbGetLocation, sbGetTransferById,
@@ -171,7 +172,7 @@ export async function handleCreateTransfer(req: Request, env: Env) {
     // KRONI shipments take 3-4 business days. Without early sync, Planta shows
     // ghost inventory during transit. We create the Odoo picking and adjust
     // Shopify now; /receive will only flip status to 'validated'.
-    let kroniEarlySync: { pickingName?: string; pickingId?: number; shopifyAdjusted?: boolean; error?: string } | undefined
+    let kroniEarlySync: { pickingName?: string; pickingId?: number; shopifyAdjusted?: boolean; error?: string; kroniReceptionId?: number; kroniReceptionName?: string; kroniError?: string } | undefined
     if (dest_id === 'KRONI/Existencias') {
         kroniEarlySync = {}
         const linesBySku = new Map<string, number>()
@@ -275,6 +276,36 @@ export async function handleCreateTransfer(req: Request, env: Env) {
             await sbLogTransfer(env, transferId, 'kroni_early_shopify_error', { error: e?.message || e })
         }
 
+        // 3. Kroni WMS: create reception so their warehouse sees the incoming shipment
+        try {
+            // Re-resolve box metadata to reconstruct cajas for Kroni's API
+            const boxResolver = new Map<string, BoxInfo>()
+            const uniqueBarcodes = [...new Set(expandedLines.filter(ln => ln.box_barcode).map(ln => ln.box_barcode!))]
+            for (const bc of uniqueBarcodes) {
+                const box = await resolveBox(env, bc)
+                if (box) boxResolver.set(bc, { sku: box.sku, qty_per_box: box.qty_per_box, label: box.label || undefined })
+            }
+
+            const kroniResult = await createKroniReception(
+                expandedLines,
+                boxResolver,
+                transferId,
+                kroniEarlySync.pickingName,
+            )
+
+            if (kroniResult.success) {
+                kroniEarlySync.kroniReceptionId = kroniResult.reception_id
+                kroniEarlySync.kroniReceptionName = kroniResult.reception_name
+                await sbLogTransfer(env, transferId, 'kroni_reception_created', kroniResult)
+            } else {
+                kroniEarlySync.kroniError = kroniResult.error
+                await sbLogTransfer(env, transferId, 'kroni_reception_error', kroniResult)
+            }
+        } catch (e: any) {
+            kroniEarlySync.kroniError = `Kroni WMS: ${e?.message || e}`
+            await sbLogTransfer(env, transferId, 'kroni_reception_error', { error: e?.message || e })
+        }
+
         await sbLogTransfer(env, transferId, 'kroni_early_sync_result', kroniEarlySync)
     }
 
@@ -288,11 +319,12 @@ export async function handleCreateTransfer(req: Request, env: Env) {
                 lines: expandedLines.length,
                 total_qty: expandedLines.reduce((a, b) => a + b.qty, 0),
                 ...(kroniEarlySync?.pickingName ? { odoo_transfer_id: kroniEarlySync.pickingName } : {}),
+                ...(kroniEarlySync?.kroniReceptionName ? { kroni_reception: kroniEarlySync.kroniReceptionName } : {}),
             },
             ...(kroniEarlySync ? { kroni_early_sync: kroniEarlySync } : {}),
             ...(stockCheckWarning ? { warning: stockCheckWarning } : {}),
             message: kroniEarlySync?.pickingName
-                ? `Orden de transferencia creada. Inventario ajustado en Odoo (${kroniEarlySync.pickingName}) y Shopify.`
+                ? `Orden de transferencia creada. Inventario ajustado en Odoo (${kroniEarlySync.pickingName}) y Shopify.${kroniEarlySync.kroniReceptionName ? ` Recepción Kroni: ${kroniEarlySync.kroniReceptionName}.` : ''}`
                 : 'Orden de transferencia creada. Pendiente de recepción en destino.',
         },
     }

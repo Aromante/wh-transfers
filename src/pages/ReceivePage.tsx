@@ -54,10 +54,15 @@ function StatusPill({ status }: { status: string }) {
 }
 
 // Summary stats from lines
-function lineStats(lines: PendingTransfer['lines']) {
+function lineStats(lines: PendingTransfer['lines'], boxCatalog?: Record<string, number>) {
   if (!lines?.length) return { skus: 0, boxes: 0, units: 0 }
   const skus = new Set(lines.map(l => l.sku || l.barcode)).size
-  const boxes = lines.filter(l => !!l.box_barcode).length
+  let boxes = 0
+  for (const l of lines) {
+    if (!l.box_barcode) continue
+    const qpb = boxCatalog?.[l.box_barcode]
+    boxes += (qpb && qpb > 0) ? Math.round(l.qty / qpb) : 1
+  }
   const units = lines.reduce((a, l) => a + (l.qty || 0), 0)
   return { skus, boxes, units }
 }
@@ -77,6 +82,20 @@ export default function ReceivePage() {
   const [result, setResult] = useState<any>(null)
   const [confirming, setConfirming] = useState(false)
   const [cancelingId, setCancelingId] = useState<string | null>(null)
+  const [boxCatalog, setBoxCatalog] = useState<Record<string, number>>({})
+
+  // Load box catalog on mount for accurate box counts
+  useEffect(() => {
+    fetch(ep('/boxes'), { headers: apiHeaders() })
+      .then(r => r.json())
+      .then(json => {
+        const boxes: Array<{ barcode: string; qty_per_box: number }> = json?.data || json || []
+        const map: Record<string, number> = {}
+        for (const b of boxes) map[b.barcode] = b.qty_per_box
+        setBoxCatalog(map)
+      })
+      .catch(() => {})
+  }, [])
 
   const loadPending = useCallback(async () => {
     setLoading(true)
@@ -288,7 +307,7 @@ export default function ReceivePage() {
         {transfers.length > 0 && (
           <div className="space-y-3">
             {transfers.map(t => {
-              const stats = lineStats(t.lines)
+              const stats = lineStats(t.lines, boxCatalog)
               const isExpanded = expandedId === t.transfer_id
               const isLoadingThis = loadingDetail === t.transfer_id
 

@@ -1,4 +1,4 @@
-export const EF_VERSION = 47
+export const EF_VERSION = 48
 
 // ── Types ──
 export type Env = {
