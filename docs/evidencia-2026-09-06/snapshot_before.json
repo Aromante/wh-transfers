@@ -1,0 +1,893 @@
+[
+ {
+  "id": 3334,
+  "activity_ids": [],
+  "activity_state": false,
+  "activity_user_id": false,
+  "activity_type_id": false,
+  "activity_type_icon": false,
+  "activity_date_deadline": false,
+  "my_activity_date_deadline": false,
+  "activity_summary": false,
+  "activity_exception_decoration": false,
+  "activity_exception_icon": false,
+  "message_is_follower": true,
+  "message_follower_ids": [
+   359895
+  ],
+  "message_partner_ids": [
+   124
+  ],
+  "message_ids": [
+   2465707
+  ],
+  "has_message": true,
+  "message_needaction": false,
+  "message_needaction_counter": 0,
+  "message_has_error": false,
+  "message_has_error_counter": 0,
+  "message_attachment_count": 0,
+  "rating_ids": [],
+  "website_message_ids": [],
+  "message_has_sms_error": false,
+  "price_extra": 258.62,
+  "lst_price": 774.9993103448277,
+  "default_code": "PER-CABGLO-100",
+  "code": "PER-CABGLO-100",
+  "partner_ref": "[PER-CABGLO-100] Caballero Glorioso (100 ML)",
+  "active": true,
+  "product_tmpl_id": [
+   3293,
+   "Caballero Glorioso"
+  ],
+  "barcode": false,
+  "product_template_attribute_value_ids": [
+   1541
+  ],
+  "product_template_variant_value_ids": [
+   1541
+  ],
+  "combination_indices": "1541",
+  "is_product_variant": true,
+  "standard_price": 29.5625,
+  "volume": 0,
+  "weight": 0,
+  "pricelist_item_count": 0,
+  "product_document_ids": [],
+  "product_document_count": 0,
+  "packaging_ids": [],
+  "additional_product_tag_ids": [],
+  "all_product_tag_ids": [
+   6
+  ],
+  "image_variant_1920": false,
+  "image_variant_1024": false,
+  "image_variant_512": false,
+  "image_variant_256": false,
+  "image_variant_128": false,
+  "can_image_variant_1024_be_zoomed": false,
+  "image_1920": false,
+  "image_1024": false,
+  "image_512": false,
+  "image_256": false,
+  "image_128": false,
+  "can_image_1024_be_zoomed": false,
+  "write_date": "2026-08-27 23:59:12",
+  "display_name": "[PER-CABGLO-100] Caballero Glorioso (100 ML)",
+  "create_uid": [
+   2,
+   "Admin"
+  ],
+  "create_date": "2026-08-19 21:36:36",
+  "write_uid": [
+   2,
+   "Admin"
+  ],
+  "tax_string": "(= $ 899.00 impuestos incluidos)",
+  "stock_quant_ids": [
+   4836,
+   4837,
+   4842,
+   4853,
+   4908,
+   4911
+  ],
+  "stock_move_ids": [
+   140629,
+   140678,
+   140713,
+   141131,
+   141669,
+   141674,
+   141935
+  ],
+  "qty_available": 58,
+  "virtual_available": 58,
+  "free_qty": 58,
+  "incoming_qty": 0,
+  "outgoing_qty": 0,
+  "orderpoint_ids": [],
+  "nbr_moves_in": 0,
+  "nbr_moves_out": 0,
+  "nbr_reordering_rules": 0,
+  "reordering_min_qty": 0,
+  "reordering_max_qty": 0,
+  "putaway_rule_ids": [],
+  "storage_category_capacity_ids": [],
+  "show_on_hand_qty_status_button": true,
+  "show_forecasted_qty_status_button": true,
+  "valid_ean": false,
+  "lot_properties_definition": [],
+  "variant_bom_ids": [
+   726
+  ],
+  "bom_line_ids": [
+   2035,
+   2037,
+   2039
+  ],
+  "bom_count": 1,
+  "used_in_bom_count": 3,
+  "mrp_product_qty": 120,
+  "is_kits": false,
+  "product_catalog_product_is_in_bom": false,
+  "product_catalog_product_is_in_mo": false,
+  "date_from": "2026-01-01",
+  "date_to": "2026-12-31",
+  "invoice_state": "open_paid",
+  "sale_avg_price": 0,
+  "purchase_avg_price": 0,
+  "sale_num_invoiced": 0,
+  "purchase_num_invoiced": 0,
+  "sales_gap": 0,
+  "purchase_gap": 0,
+  "turnover": 0,
+  "total_cost": 0,
+  "sale_expected": 0,
+  "normal_cost": 0,
+  "total_margin": 0,
+  "expected_margin": 0,
+  "total_margin_rate": 0,
+  "expected_margin_rate": 0,
+  "purchased_product_qty": 0,
+  "is_in_purchase_order": false,
+  "value_svl": 3606.62,
+  "quantity_svl": 122,
+  "avg_cost": 29.56,
+  "total_value": 1714.62,
+  "company_currency_id": [
+   33,
+   "MXN"
+  ],
+  "stock_valuation_layer_ids": [
+   51733,
+   51741,
+   52228
+  ],
+  "valuation": "real_time",
+  "cost_method": "average",
+  "has_image": false,
+  "purchase_order_line_ids": [],
+  "sales_count": 0,
+  "product_catalog_product_is_in_sale_order": false,
+  "x_studio_sku": "PER-CABGLO-100",
+  "x_shopify_inventory_item_id": "52825562841400",
+  "x_sku_old": false,
+  "name": "Caballero Glorioso",
+  "sequence": 1,
+  "description": false,
+  "description_purchase": false,
+  "description_sale": false,
+  "type": "consu",
+  "combo_ids": [],
+  "service_tracking": "no",
+  "categ_id": [
+   2,
+   "Ready 2 Sell"
+  ],
+  "currency_id": [
+   33,
+   "MXN"
+  ],
+  "cost_currency_id": [
+   33,
+   "MXN"
+  ],
+  "list_price": 516.3793103448277,
+  "volume_uom_name": "m³",
+  "weight_uom_name": "kg",
+  "sale_ok": true,
+  "purchase_ok": false,
+  "uom_id": [
+   1,
+   "Units"
+  ],
+  "uom_name": "Units",
+  "uom_category_id": [
+   1,
+   "Unit"
+  ],
+  "uom_po_id": [
+   1,
+   "Units"
+  ],
+  "company_id": false,
+  "seller_ids": [
+   731
+  ],
+  "variant_seller_ids": [
+   731
+  ],
+  "color": 0,
+  "attribute_line_ids": [
+   1333
+  ],
+  "valid_product_template_attribute_line_ids": [
+   1333
+  ],
+  "product_variant_ids": [
+   3334
+  ],
+  "product_variant_id": [
+   3334,
+   "[PER-CABGLO-100] Caballero Glorioso (100 ML)"
+  ],
+  "product_variant_count": 1,
+  "has_configurable_attributes": true,
+  "product_tooltip": "Puedes facturar los bienes antes de entregarlos.",
+  "is_favorite": false,
+  "product_tag_ids": [
+   6
+  ],
+  "product_properties": [],
+  "taxes_id": [
+   14
+  ],
+  "supplier_taxes_id": [
+   24
+  ],
+  "property_account_income_id": false,
+  "property_account_expense_id": false,
+  "account_tag_ids": [],
+  "fiscal_country_codes": "MX",
+  "is_storable": true,
+  "responsible_id": [
+   2,
+   "Admin"
+  ],
+  "property_stock_production": [
+   15,
+   "Virtual Locations/Production"
+  ],
+  "property_stock_inventory": [
+   14,
+   "Virtual Locations/Inventory adjustment"
+  ],
+  "sale_delay": 0,
+  "tracking": "none",
+  "description_picking": false,
+  "description_pickingout": false,
+  "description_pickingin": false,
+  "location_id": false,
+  "warehouse_id": false,
+  "has_available_route_ids": true,
+  "route_ids": [],
+  "route_from_categ_ids": [],
+  "bom_ids": [
+   726
+  ],
+  "unspsc_code_id": false,
+  "purchase_method": "purchase",
+  "purchase_line_warn": "no-message",
+  "purchase_line_warn_msg": false,
+  "lot_valuated": false,
+  "l10n_mx_edi_predial_account": false,
+  "property_account_creditor_price_difference": false,
+  "service_type": "manual",
+  "sale_line_warn": "no-message",
+  "sale_line_warn_msg": false,
+  "expense_policy": "no",
+  "visible_expense_policy": false,
+  "invoice_policy": "order",
+  "optional_product_ids": [],
+  "x_origin_r2s_tmpl_id": false,
+  "x_is_r2s_category": true,
+  "service_to_purchase": false,
+  "project_id": false,
+  "project_template_id": false,
+  "service_policy": "ordered_prepaid"
+ },
+ {
+  "id": 3322,
+  "activity_ids": [],
+  "activity_state": false,
+  "activity_user_id": false,
+  "activity_type_id": false,
+  "activity_type_icon": false,
+  "activity_date_deadline": false,
+  "my_activity_date_deadline": false,
+  "activity_summary": false,
+  "activity_exception_decoration": false,
+  "activity_exception_icon": false,
+  "message_is_follower": true,
+  "message_follower_ids": [
+   359866
+  ],
+  "message_partner_ids": [
+   124
+  ],
+  "message_ids": [
+   2465676,
+   2465647
+  ],
+  "has_message": true,
+  "message_needaction": false,
+  "message_needaction_counter": 0,
+  "message_has_error": false,
+  "message_has_error_counter": 0,
+  "message_attachment_count": 0,
+  "rating_ids": [],
+  "website_message_ids": [],
+  "message_has_sms_error": false,
+  "price_extra": 258.62,
+  "lst_price": 516.38,
+  "default_code": "PER-ELEETE-100",
+  "code": "PER-ELEETE-100",
+  "partner_ref": "[PER-ELEETE-100] Elegancia Eterna (100 ML)",
+  "active": true,
+  "product_tmpl_id": [
+   3288,
+   "Elegancia Eterna"
+  ],
+  "barcode": false,
+  "product_template_attribute_value_ids": [
+   1532
+  ],
+  "product_template_variant_value_ids": [
+   1532
+  ],
+  "combination_indices": "1532",
+  "is_product_variant": true,
+  "standard_price": 29.5625,
+  "volume": 0,
+  "weight": 0,
+  "pricelist_item_count": 0,
+  "product_document_ids": [],
+  "product_document_count": 0,
+  "packaging_ids": [],
+  "additional_product_tag_ids": [],
+  "all_product_tag_ids": [],
+  "image_variant_1920": false,
+  "image_variant_1024": false,
+  "image_variant_512": false,
+  "image_variant_256": false,
+  "image_variant_128": false,
+  "can_image_variant_1024_be_zoomed": false,
+  "image_1920": false,
+  "image_1024": false,
+  "image_512": false,
+  "image_256": false,
+  "image_128": false,
+  "can_image_1024_be_zoomed": false,
+  "write_date": "2026-08-27 23:59:12",
+  "display_name": "[PER-ELEETE-100] Elegancia Eterna (100 ML)",
+  "create_uid": [
+   2,
+   "Admin"
+  ],
+  "create_date": "2026-08-19 21:01:12",
+  "write_uid": [
+   2,
+   "Admin"
+  ],
+  "tax_string": "(= $ 599.00 impuestos incluidos)",
+  "stock_quant_ids": [
+   4839,
+   4840,
+   4841,
+   4854,
+   4909,
+   4912
+  ],
+  "stock_move_ids": [
+   140602,
+   140677,
+   140730,
+   141148,
+   141670,
+   141675,
+   141952
+  ],
+  "qty_available": 58,
+  "virtual_available": 58,
+  "free_qty": 58,
+  "incoming_qty": 0,
+  "outgoing_qty": 0,
+  "orderpoint_ids": [],
+  "nbr_moves_in": 0,
+  "nbr_moves_out": 0,
+  "nbr_reordering_rules": 0,
+  "reordering_min_qty": 0,
+  "reordering_max_qty": 0,
+  "putaway_rule_ids": [],
+  "storage_category_capacity_ids": [],
+  "show_on_hand_qty_status_button": true,
+  "show_forecasted_qty_status_button": true,
+  "valid_ean": false,
+  "lot_properties_definition": [],
+  "variant_bom_ids": [
+   717
+  ],
+  "bom_line_ids": [
+   2010,
+   2012,
+   2014
+  ],
+  "bom_count": 1,
+  "used_in_bom_count": 3,
+  "mrp_product_qty": 120,
+  "is_kits": false,
+  "product_catalog_product_is_in_bom": false,
+  "product_catalog_product_is_in_mo": false,
+  "date_from": "2026-01-01",
+  "date_to": "2026-12-31",
+  "invoice_state": "open_paid",
+  "sale_avg_price": 0,
+  "purchase_avg_price": 0,
+  "sale_num_invoiced": 0,
+  "purchase_num_invoiced": 0,
+  "sales_gap": 0,
+  "purchase_gap": 0,
+  "turnover": 0,
+  "total_cost": 0,
+  "sale_expected": 0,
+  "normal_cost": 0,
+  "total_margin": 0,
+  "expected_margin": 0,
+  "total_margin_rate": 0,
+  "expected_margin_rate": 0,
+  "purchased_product_qty": 0,
+  "is_in_purchase_order": false,
+  "value_svl": 3606.63,
+  "quantity_svl": 122,
+  "avg_cost": 29.56,
+  "total_value": 1714.63,
+  "company_currency_id": [
+   33,
+   "MXN"
+  ],
+  "stock_valuation_layer_ids": [
+   51739,
+   51743,
+   52232
+  ],
+  "valuation": "real_time",
+  "cost_method": "average",
+  "has_image": false,
+  "purchase_order_line_ids": [],
+  "sales_count": 0,
+  "product_catalog_product_is_in_sale_order": false,
+  "x_studio_sku": "PER-ELEETE-100",
+  "x_shopify_inventory_item_id": "52224875594040",
+  "x_sku_old": false,
+  "name": "Elegancia Eterna",
+  "sequence": 1,
+  "description": false,
+  "description_purchase": false,
+  "description_sale": false,
+  "type": "consu",
+  "combo_ids": [],
+  "service_tracking": "no",
+  "categ_id": [
+   2,
+   "Ready 2 Sell"
+  ],
+  "currency_id": [
+   33,
+   "MXN"
+  ],
+  "cost_currency_id": [
+   33,
+   "MXN"
+  ],
+  "list_price": 257.76,
+  "volume_uom_name": "m³",
+  "weight_uom_name": "kg",
+  "sale_ok": true,
+  "purchase_ok": false,
+  "uom_id": [
+   1,
+   "Units"
+  ],
+  "uom_name": "Units",
+  "uom_category_id": [
+   1,
+   "Unit"
+  ],
+  "uom_po_id": [
+   1,
+   "Units"
+  ],
+  "company_id": false,
+  "seller_ids": [
+   732
+  ],
+  "variant_seller_ids": [
+   732
+  ],
+  "color": 0,
+  "attribute_line_ids": [
+   1329
+  ],
+  "valid_product_template_attribute_line_ids": [
+   1329
+  ],
+  "product_variant_ids": [
+   3322
+  ],
+  "product_variant_id": [
+   3322,
+   "[PER-ELEETE-100] Elegancia Eterna (100 ML)"
+  ],
+  "product_variant_count": 1,
+  "has_configurable_attributes": true,
+  "product_tooltip": "Puedes facturar los bienes antes de entregarlos.",
+  "is_favorite": false,
+  "product_tag_ids": [],
+  "product_properties": [],
+  "taxes_id": [
+   14
+  ],
+  "supplier_taxes_id": [
+   24
+  ],
+  "property_account_income_id": false,
+  "property_account_expense_id": false,
+  "account_tag_ids": [],
+  "fiscal_country_codes": "MX",
+  "is_storable": true,
+  "responsible_id": [
+   2,
+   "Admin"
+  ],
+  "property_stock_production": [
+   15,
+   "Virtual Locations/Production"
+  ],
+  "property_stock_inventory": [
+   14,
+   "Virtual Locations/Inventory adjustment"
+  ],
+  "sale_delay": 0,
+  "tracking": "none",
+  "description_picking": false,
+  "description_pickingout": false,
+  "description_pickingin": false,
+  "location_id": false,
+  "warehouse_id": false,
+  "has_available_route_ids": true,
+  "route_ids": [],
+  "route_from_categ_ids": [],
+  "bom_ids": [
+   717
+  ],
+  "unspsc_code_id": false,
+  "purchase_method": "purchase",
+  "purchase_line_warn": "no-message",
+  "purchase_line_warn_msg": false,
+  "lot_valuated": false,
+  "l10n_mx_edi_predial_account": false,
+  "property_account_creditor_price_difference": false,
+  "service_type": "manual",
+  "sale_line_warn": "no-message",
+  "sale_line_warn_msg": false,
+  "expense_policy": "no",
+  "visible_expense_policy": false,
+  "invoice_policy": "order",
+  "optional_product_ids": [],
+  "x_origin_r2s_tmpl_id": false,
+  "x_is_r2s_category": true,
+  "service_to_purchase": false,
+  "project_id": false,
+  "project_template_id": false,
+  "service_policy": "ordered_prepaid"
+ },
+ {
+  "id": 3309,
+  "activity_ids": [],
+  "activity_state": false,
+  "activity_user_id": false,
+  "activity_type_id": false,
+  "activity_type_icon": false,
+  "activity_date_deadline": false,
+  "my_activity_date_deadline": false,
+  "activity_summary": false,
+  "activity_exception_decoration": false,
+  "activity_exception_icon": false,
+  "message_is_follower": true,
+  "message_follower_ids": [
+   359837
+  ],
+  "message_partner_ids": [
+   124
+  ],
+  "message_ids": [
+   2465616
+  ],
+  "has_message": true,
+  "message_needaction": false,
+  "message_needaction_counter": 0,
+  "message_has_error": false,
+  "message_has_error_counter": 0,
+  "message_attachment_count": 0,
+  "rating_ids": [],
+  "website_message_ids": [],
+  "message_has_sms_error": false,
+  "price_extra": 258.62,
+  "lst_price": 516.38,
+  "default_code": "PER-ESEITA-100",
+  "code": "PER-ESEITA-100",
+  "partner_ref": "[PER-ESEITA-100] Esencia Italiana (100 ML)",
+  "active": true,
+  "product_tmpl_id": [
+   3283,
+   "Esencia Italiana"
+  ],
+  "barcode": false,
+  "product_template_attribute_value_ids": [
+   1522
+  ],
+  "product_template_variant_value_ids": [
+   1522
+  ],
+  "combination_indices": "1522",
+  "is_product_variant": true,
+  "standard_price": 29.5625,
+  "volume": 0,
+  "weight": 0,
+  "pricelist_item_count": 0,
+  "product_document_ids": [],
+  "product_document_count": 0,
+  "packaging_ids": [],
+  "additional_product_tag_ids": [],
+  "all_product_tag_ids": [
+   6
+  ],
+  "image_variant_1920": false,
+  "image_variant_1024": false,
+  "image_variant_512": false,
+  "image_variant_256": false,
+  "image_variant_128": false,
+  "can_image_variant_1024_be_zoomed": false,
+  "image_1920": false,
+  "image_1024": false,
+  "image_512": false,
+  "image_256": false,
+  "image_128": false,
+  "can_image_1024_be_zoomed": false,
+  "write_date": "2026-08-27 23:59:12",
+  "display_name": "[PER-ESEITA-100] Esencia Italiana (100 ML)",
+  "create_uid": [
+   2,
+   "Admin"
+  ],
+  "create_date": "2026-08-19 20:55:32",
+  "write_uid": [
+   2,
+   "Admin"
+  ],
+  "tax_string": "(= $ 599.00 impuestos incluidos)",
+  "stock_quant_ids": [
+   4833,
+   4834,
+   4843,
+   4858,
+   4910,
+   4913
+  ],
+  "stock_move_ids": [
+   140656,
+   140679,
+   140767,
+   141185,
+   141671,
+   141678,
+   141989
+  ],
+  "qty_available": 57,
+  "virtual_available": 57,
+  "free_qty": 57,
+  "incoming_qty": 0,
+  "outgoing_qty": 0,
+  "orderpoint_ids": [],
+  "nbr_moves_in": 0,
+  "nbr_moves_out": 0,
+  "nbr_reordering_rules": 0,
+  "reordering_min_qty": 0,
+  "reordering_max_qty": 0,
+  "putaway_rule_ids": [],
+  "storage_category_capacity_ids": [],
+  "show_on_hand_qty_status_button": true,
+  "show_forecasted_qty_status_button": true,
+  "valid_ean": false,
+  "lot_properties_definition": [],
+  "variant_bom_ids": [
+   708
+  ],
+  "bom_line_ids": [
+   1985,
+   1987,
+   1989
+  ],
+  "bom_count": 1,
+  "used_in_bom_count": 3,
+  "mrp_product_qty": 120,
+  "is_kits": false,
+  "product_catalog_product_is_in_bom": false,
+  "product_catalog_product_is_in_mo": false,
+  "date_from": "2026-01-01",
+  "date_to": "2026-12-31",
+  "invoice_state": "open_paid",
+  "sale_avg_price": 0,
+  "purchase_avg_price": 0,
+  "sale_num_invoiced": 0,
+  "purchase_num_invoiced": 0,
+  "sales_gap": 0,
+  "purchase_gap": 0,
+  "turnover": 0,
+  "total_cost": 0,
+  "sale_expected": 0,
+  "normal_cost": 0,
+  "total_margin": 0,
+  "expected_margin": 0,
+  "total_margin_rate": 0,
+  "expected_margin_rate": 0,
+  "purchased_product_qty": 0,
+  "is_in_purchase_order": false,
+  "value_svl": 3577.07,
+  "quantity_svl": 121,
+  "avg_cost": 29.56,
+  "total_value": 1685.07,
+  "company_currency_id": [
+   33,
+   "MXN"
+  ],
+  "stock_valuation_layer_ids": [
+   51727,
+   51754,
+   52236
+  ],
+  "valuation": "real_time",
+  "cost_method": "average",
+  "has_image": false,
+  "purchase_order_line_ids": [],
+  "sales_count": 0,
+  "product_catalog_product_is_in_sale_order": false,
+  "x_studio_sku": "PER-ESEITA-100",
+  "x_shopify_inventory_item_id": "52825576210744",
+  "x_sku_old": false,
+  "name": "Esencia Italiana",
+  "sequence": 1,
+  "description": false,
+  "description_purchase": false,
+  "description_sale": false,
+  "type": "consu",
+  "combo_ids": [],
+  "service_tracking": "no",
+  "categ_id": [
+   2,
+   "Ready 2 Sell"
+  ],
+  "currency_id": [
+   33,
+   "MXN"
+  ],
+  "cost_currency_id": [
+   33,
+   "MXN"
+  ],
+  "list_price": 257.76,
+  "volume_uom_name": "m³",
+  "weight_uom_name": "kg",
+  "sale_ok": true,
+  "purchase_ok": false,
+  "uom_id": [
+   1,
+   "Units"
+  ],
+  "uom_name": "Units",
+  "uom_category_id": [
+   1,
+   "Unit"
+  ],
+  "uom_po_id": [
+   1,
+   "Units"
+  ],
+  "company_id": false,
+  "seller_ids": [
+   733
+  ],
+  "variant_seller_ids": [
+   733
+  ],
+  "color": 0,
+  "attribute_line_ids": [
+   1325
+  ],
+  "valid_product_template_attribute_line_ids": [
+   1325
+  ],
+  "product_variant_ids": [
+   3309
+  ],
+  "product_variant_id": [
+   3309,
+   "[PER-ESEITA-100] Esencia Italiana (100 ML)"
+  ],
+  "product_variant_count": 1,
+  "has_configurable_attributes": true,
+  "product_tooltip": "Puedes facturar los bienes antes de entregarlos.",
+  "is_favorite": false,
+  "product_tag_ids": [
+   6
+  ],
+  "product_properties": [],
+  "taxes_id": [
+   14
+  ],
+  "supplier_taxes_id": [
+   24
+  ],
+  "property_account_income_id": false,
+  "property_account_expense_id": false,
+  "account_tag_ids": [],
+  "fiscal_country_codes": "MX",
+  "is_storable": true,
+  "responsible_id": [
+   2,
+   "Admin"
+  ],
+  "property_stock_production": [
+   15,
+   "Virtual Locations/Production"
+  ],
+  "property_stock_inventory": [
+   14,
+   "Virtual Locations/Inventory adjustment"
+  ],
+  "sale_delay": 0,
+  "tracking": "none",
+  "description_picking": false,
+  "description_pickingout": false,
+  "description_pickingin": false,
+  "location_id": false,
+  "warehouse_id": false,
+  "has_available_route_ids": true,
+  "route_ids": [],
+  "route_from_categ_ids": [],
+  "bom_ids": [
+   708
+  ],
+  "unspsc_code_id": false,
+  "purchase_method": "purchase",
+  "purchase_line_warn": "no-message",
+  "purchase_line_warn_msg": false,
+  "lot_valuated": false,
+  "l10n_mx_edi_predial_account": false,
+  "property_account_creditor_price_difference": false,
+  "service_type": "manual",
+  "sale_line_warn": "no-message",
+  "sale_line_warn_msg": false,
+  "expense_policy": "no",
+  "visible_expense_policy": false,
+  "invoice_policy": "order",
+  "optional_product_ids": [],
+  "x_origin_r2s_tmpl_id": false,
+  "x_is_r2s_category": true,
+  "service_to_purchase": false,
+  "project_id": false,
+  "project_template_id": false,
+  "service_policy": "ordered_prepaid"
+ }
+]

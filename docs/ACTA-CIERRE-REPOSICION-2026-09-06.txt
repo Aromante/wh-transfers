@@ -1,0 +1,517 @@
+================================================================================
+ACTA DE EJECUCION Y CIERRE — REPOSICION DE 448 UNIDADES EN SHOPIFY
+Transferencias #973F32BF (Ceiba) y #EC3C2698 (Conquista)
+Metodo: ajuste directo de inventario en destino (inventoryAdjustQuantities)
+Fecha de ejecucion: 2026-09-06
+Autorizado por: Adrian (autorizacion explicita por tanda, una a la vez)
+Documento forense completo: docs/INCIDENTE-SHOPIFY-TRANSFERS-2026-09-06.txt
+================================================================================
+
+NOTA SOBRE ESTE DOCUMENTO
+--------------------------------------------------------------------------------
+  Esta acta es AUTOCONTENIDA: se puede leer sin el documento forense de 914
+  lineas. La PARTE 4 de aquel documento cubre lo mismo de forma resumida; esta
+  acta amplia el detalle operativo (payloads exactos, lecturas crudas,
+  verificaciones). Si se prefiere una sola fuente, esta acta puede archivarse y
+  dejar la PARTE 4 como referencia, o al reves. No se borro nada de ninguno.
+
+
+================================================================================
+1. RESUMEN DE LA INTERVENCION
+================================================================================
+
+  QUE SE REPUSO      448 unidades en Shopify que Odoo si habia movido el
+                     2026-09-01 y que Shopify nunca registro.
+                       152 u -> Aromante La Conquista   (#EC3C2698, 4 SKUs)
+                       296 u -> Aromante La Ceiba       (#973F32BF, 10 SKUs)
+
+  COMO               inventoryAdjustQuantities, reason "correction",
+                     name "available", una sola llamada ATOMICA por tanda.
+
+  QUE NO SE HIZO     · NO se creo ningun InventoryTransfer en Shopify.
+                     · NO se escribio nada en Odoo.
+                     · NO se escribio nada en Planta Productora.
+                     · NO se modifico status, odoo_transfer_id ni
+                       shopify_transfer_id en Supabase.
+
+  RESULTADO          14 de 14 lineas verificadas por relectura independiente.
+                     0 userErrors. 0 discrepancias contra lo esperado.
+
+  TRADE-OFF ACEPTADO Se pierde la trazabilidad de "fue una transferencia" en el
+                     historial de Shopify. Queda registrado como ajuste manual
+                     de inventario, no como movimiento entre ubicaciones.
+                     Decision explicita del responsable.
+
+
+================================================================================
+2. VIABILIDAD — POR QUE ESTA VIA SI Y LA DE TRANSFERENCIA NO
+================================================================================
+
+2.1 SCOPES REALES DE LA CONEXION (consulta de solo lectura, previa a escribir)
+--------------------------------------------------------------------------------
+  query { currentAppInstallation { id accessScopes { handle } app { title } } }
+
+      App    : "Shopify Claude Connector App"
+      Id     : gid://shopify/AppInstallation/944475537720
+
+      write_inventory ................. CONCEDIDO
+      read_inventory .................. CONCEDIDO
+      read_locations / write_locations . CONCEDIDO
+      read_inventory_transfers ........ AUSENTE
+      write_inventory_transfers ....... AUSENTE
+
+  CONCLUSION: son FAMILIAS DE SCOPES DISTINTAS. `inventoryTransfers` es su
+  propia familia y no la tenemos; `inventoryAdjustQuantities` cae bajo
+  `write_inventory`, que si tenemos. Eso explica por que durante todo el
+  diagnostico se pudo leer `inventoryLevels` sin problema mientras
+  `inventoryTransfers` devolvia "Access denied".
+
+  Los scopes de Shopify NO estan acotados por ubicacion: `write_inventory`
+  aplica a las 4 ubicaciones por igual. No habia nada que limitara el ajuste a
+  Planta desde el lado de permisos.
+
+2.2 POR QUE NO SE USO /shopify/adjust-planta
+--------------------------------------------------------------------------------
+  Ese endpoint esta limitado a Planta POR CODIGO, no por permisos:
+
+      shopify.ts:327   plantaGid = await getShopifyLocationGid(env, 'WH/Existencias')
+      shopify.ts:354   inventoryLevel(locationId: "${plantaGid}")      // lectura
+      shopify.ts:369   { ..., locationId: "${plantaGid}", delta: ..., changeFromQuantity: ... }
+      routes-misc.ts:138  handleAdjustPlantaInventory -> solo acepta { sku, delta }
+
+  Ademas usaria el token de la Edge Function, que es un secret de Supabase no
+  disponible en este entorno.
+
+  Se llamo `inventoryAdjustQuantities` DIRECTAMENTE, replicando el PATRON de
+  `adjustShopifyPlantaInventory` (misma mutacion, mismo reason "correction",
+  mismo uso de changeFromQuantity para compare-and-swap) pero con el locationId
+  de destino.
+
+2.3 PRECISION TECNICA APLICADA — available, NO on_hand
+--------------------------------------------------------------------------------
+  La instruccion original pedia releer `on_hand` como baseline. Se corrigio
+  antes de ejecutar: el compare-and-swap de Shopify exige que
+  `changeFromQuantity` corresponda AL MISMO ESTADO que se ajusta. Se ajusto
+  `name: "available"`, luego el baseline debe ser `available`.
+
+  La diferencia era REAL y habria roto el compare-and-swap en dos lineas:
+
+      PER-FORSED-100 (Ceiba)   available 0   on_hand 1    committed 1
+      PER-HORAZU-100 (Ceiba)   available 8   on_hand 10   committed 2
+
+  Ajustar `available` sube tambien `on_hand`, que es lo correcto para
+  mercancia que llego fisicamente y es vendible. Las unidades `committed`
+  (pedidos sin surtir) se preservan intactas.
+
+
+================================================================================
+3. TANDA 1 — CONQUISTA #EC3C2698  (canario)
+================================================================================
+
+  Se ejecuto primero por criterio de riesgo, no de tamaño: sus 4 lineas
+  incluyen LOS TRES SKUs REPARADOS (CABGLO, ELEETE, ESEITA). Ejercita el 100%
+  del riesgo con el 34% del volumen.
+
+3.1 LECTURA EN VIVO INMEDIATAMENTE ANTES DE ESCRIBIR
+--------------------------------------------------------------------------------
+  Ubicacion: gid://shopify/Location/80271802680
+
+      SKU               available  on_hand  committed  incoming
+      BOL-KRAFT              18       18        0         0
+      PER-CABGLO-100          0        0        0         0
+      PER-ELEETE-100          0        0        0         0
+      PER-ESEITA-100          0        0        0         0
+
+  Coincidio exactamente con la lectura de una hora antes -> no hubo ventas
+  concurrentes en la ventana.
+
+3.2 VALIDACION PREVIA DE LA MUTACION
+--------------------------------------------------------------------------------
+  validate_graphql_codeblocks -> VALID
+  Scopes requeridos reportados: write_inventory, read_inventory, read_products,
+  read_locations, read_markets_home
+
+3.3 MUTACION EJECUTADA
+--------------------------------------------------------------------------------
+  mutation adjustConquista($input: InventoryAdjustQuantitiesInput!) {
+    inventoryAdjustQuantities(input: $input) {
+      inventoryAdjustmentGroup {
+        id createdAt reason referenceDocumentUri
+        changes { name delta quantityAfterChange item { id sku } location { id name } }
+      }
+      userErrors { field message }
+    }
+  }
+
+  input:
+    reason  : "correction"
+    name    : "available"
+    referenceDocumentUri:
+              "urn:aromante:wh-transfers:transfer:ec3c2698-3e51-4d31-9e94-6a8b28d71c60"
+    changes : [
+      { inventoryItemId: gid://shopify/InventoryItem/54893766246712,
+        locationId: gid://shopify/Location/80271802680, delta: 80, changeFromQuantity: 18 },
+      { inventoryItemId: gid://shopify/InventoryItem/54897981882680,
+        locationId: gid://shopify/Location/80271802680, delta: 24, changeFromQuantity: 0 },
+      { inventoryItemId: gid://shopify/InventoryItem/54286740652344,
+        locationId: gid://shopify/Location/80271802680, delta: 24, changeFromQuantity: 0 },
+      { inventoryItemId: gid://shopify/InventoryItem/54897995055416,
+        locationId: gid://shopify/Location/80271802680, delta: 24, changeFromQuantity: 0 }
+    ]
+
+  RESPUESTA
+    inventoryAdjustmentGroup.id : gid://shopify/InventoryAdjustmentGroup/77648889708856
+    createdAt                   : 2026-09-06T21:38:59Z
+    reason                      : correction
+    userErrors                  : []   (vacio)
+    changes                     : 8 entradas (4 available + 4 on_hand)
+    quantityAfterChange         : null en las 8   <-- ver seccion 6
+
+3.4 VERIFICACION POR RELECTURA INDEPENDIENTE
+--------------------------------------------------------------------------------
+  SKU               item_id           delta  avail antes -> despues  esperado  OK
+  BOL-KRAFT         54893766246712     +80        18 ->  98             98     OK
+  PER-CABGLO-100    54897981882680     +24         0 ->  24             24     OK
+  PER-ELEETE-100    54286740652344     +24         0 ->  24             24     OK
+  PER-ESEITA-100    54897995055416     +24         0 ->  24             24     OK
+                                      ----
+                                      +152
+
+  on_hand siguio a available en los cuatro (18->98, 0->24, 0->24, 0->24).
+  committed e incoming quedaron en 0.
+
+3.5 PLANTA — VERIFICADA ANTES Y DESPUES
+--------------------------------------------------------------------------------
+  gid://shopify/Location/103584596280
+
+      SKU               antes            despues
+      BOL-KRAFT         3040 / 3040      3040 / 3040
+      PER-CABGLO-100       0 /    0         0 /    0
+      PER-ELEETE-100       0 /    0         0 /    0
+      PER-ESEITA-100       0 /    0         0 /    0
+                        (available / on_hand)
+
+  Identica. Planta no aparece en ninguna de las 4 lineas de la mutacion.
+
+  *** PARADA OBLIGATORIA. Se reporto el resultado y se espero autorizacion
+  *** explicita antes de continuar con Ceiba.
+
+
+================================================================================
+4. TANDA 2 — CEIBA #973F32BF
+================================================================================
+
+4.1 LECTURA EN VIVO INMEDIATAMENTE ANTES DE ESCRIBIR
+--------------------------------------------------------------------------------
+  Ubicacion: gid://shopify/Location/107414356280
+
+      SKU               available  on_hand  committed  incoming
+      BOL-KRAFT              13       13        0         0
+      PER-AURMIS-100          3        3        0         0
+      PER-CABGLO-100          0        0        0         0
+      PER-ELEETE-100          0        0        0         0
+      PER-ELEROM-100          6        6        0         0
+      PER-ESEDIV-100          0        0        0         0
+      PER-ESEITA-100         -1       -1        0         0    <-- negativo real
+      PER-FORSED-100          0        1        1         0    <-- avail != on_hand
+      PER-HORAZU-100          8       10        2         0    <-- avail != on_hand
+      PER-SUSCOS-100          2        2        0         0
+
+  Los dos casos de avail != on_hand quedaron explicados: unidades `committed`
+  por pedidos sin surtir (1 y 2 respectivamente).
+
+4.2 MUTACION EJECUTADA
+--------------------------------------------------------------------------------
+  Misma forma validada en la tanda 1, con 10 changes.
+
+    reason  : "correction"
+    name    : "available"
+    referenceDocumentUri:
+              "urn:aromante:wh-transfers:transfer:973f32bf-36aa-4646-8372-3d8bb8a3b4ad"
+    locationId (las 10): gid://shopify/Location/107414356280
+
+      item_id           delta  changeFromQuantity
+      54893766246712     +80          13
+      47057568497976     +24           3
+      54897981882680     +24           0
+      54286740652344     +24           0
+      51096151523640     +24           6
+      47379308446008     +24           0
+      54897995055416     +24          -1
+      50358615900472     +24           0
+      47059514818872     +24           8
+      51096156569912     +24           2
+
+  RESPUESTA
+    inventoryAdjustmentGroup.id : gid://shopify/InventoryAdjustmentGroup/77648974840120
+    createdAt                   : 2026-09-06T21:43:55Z
+    reason                      : correction
+    userErrors                  : []   (vacio)
+    changes                     : 20 entradas (10 available + 10 on_hand)
+
+4.3 VERIFICACION POR RELECTURA INDEPENDIENTE
+--------------------------------------------------------------------------------
+  SKU              item_id          delta  avail antes->desp  esperado OK  on_hand
+  BOL-KRAFT        54893766246712    +80       13 ->  93        93    OK   13 ->  93
+  PER-AURMIS-100   47057568497976    +24        3 ->  27        27    OK    3 ->  27
+  PER-CABGLO-100   54897981882680    +24        0 ->  24        24    OK    0 ->  24
+  PER-ELEETE-100   54286740652344    +24        0 ->  24        24    OK    0 ->  24
+  PER-ELEROM-100   51096151523640    +24        6 ->  30        30    OK    6 ->  30
+  PER-ESEDIV-100   47379308446008    +24        0 ->  24        24    OK    0 ->  24
+  PER-ESEITA-100   54897995055416    +24       -1 ->  23  (*)   23    OK   -1 ->  23
+  PER-FORSED-100   50358615900472    +24        0 ->  24 (**)   24    OK    1 ->  25
+  PER-HORAZU-100   47059514818872    +24        8 ->  32 (**)   32    OK   10 ->  34
+  PER-SUSCOS-100   51096156569912    +24        2 ->  26        26    OK    2 ->  26
+                                    ----
+                                    +296
+
+   (*) PER-ESEITA-100 partia de -1 por una venta real contra stock que Shopify
+       creia inexistente. Terminar en 23 y NO en 24 es el resultado CORRECTO.
+       No se forzo a 24: la venta ocurrio de verdad.
+
+  (**) available != on_hand por unidades committed. Baseline usado: available.
+       Los committed se preservaron intactos (FORSED 1, HORAZU 2), por eso
+       on_hand queda 1 y 2 unidades por encima de available respectivamente.
+
+4.4 PLANTA — VERIFICADA ANTES Y DESPUES, LOS 10 SKUs
+--------------------------------------------------------------------------------
+  gid://shopify/Location/103584596280   (available / on_hand)
+
+      SKU               antes          despues
+      BOL-KRAFT         3040 / 3040    3040 / 3040
+      PER-AURMIS-100      44 /   44      44 /   44
+      PER-CABGLO-100       0 /    0       0 /    0
+      PER-ELEETE-100       0 /    0       0 /    0
+      PER-ELEROM-100      12 /   12      12 /   12
+      PER-ESEDIV-100      17 /   17      17 /   17
+      PER-ESEITA-100       0 /    0       0 /    0
+      PER-FORSED-100      10 /   10      10 /   10
+      PER-HORAZU-100      22 /   22      22 /   22
+      PER-SUSCOS-100       8 /    8       8 /    8
+
+  Sin un solo cambio. Planta no aparece en ninguna de las 10 lineas.
+
+  POR QUE NO HACIA FALTA TOCARLA: Planta ya reflejaba correctamente la salida
+  fisica del 2026-09-01 (se verifico en el diagnostico que 120 de 130 SKUs
+  mapeados coinciden con Odoo WH). Sumar solo en destino no genera doble
+  conteo y no requiere compensacion. Esa fue precisamente la ventaja de esta
+  via sobre la de replicar la transferencia.
+
+
+================================================================================
+5. REGISTRO EN SUPABASE
+================================================================================
+
+5.1 EVENTOS INSERTADOS
+--------------------------------------------------------------------------------
+  Tabla: transfer_logs        Evento: shopify_backfill_direct_adjust
+  Ambos insertados con HTTP 201.
+
+    #EC3C2698   id c88fb246-7710-4e68-b51d-a0121476e75a
+                ts 2026-09-06T14:40:16.815380-07:00
+    #973F32BF   id 6f4d11fa-71e5-4d23-9f4b-6045238fdd6b
+                ts 2026-09-06T14:44:41.445063-07:00
+
+5.2 CONTENIDO DEL detail (ambos)
+--------------------------------------------------------------------------------
+    motivo                        causa raiz completa del incidente
+    method                        "inventoryAdjustQuantities"
+    no_inventory_transfer_created true
+    nota_trazabilidad             explica que NO se creo InventoryTransfer y
+                                  por que shopify_transfer_id queda NULL
+    fecha_movimiento_fisico_real  "2026-09-01"
+    fecha_ajuste                  "2026-09-06T21:38:59Z" / "...T21:43:55Z"
+    odoo_picking                  "WH/INT/00314" / "WH/INT/00315"
+    odoo_picking_id               42309 / 42310
+    destino                       nombre + shopify_location_id
+    planta_tocada                 false
+    planta_nota                   justificacion de por que no se toco
+    shopify_adjustment_group_id   el GID del AdjustmentGroup
+    shopify_reason                "correction"
+    shopify_quantity_name         "available"
+    referenceDocumentUri          el urn: del transfer
+    app_ejecutora                 "Shopify Claude Connector App"
+    total_unidades                152 / 296
+    lineas[]                      sku, inventory_item_id, delta,
+                                  available_antes/despues,
+                                  on_hand_antes/despues, y nota en los 3 casos
+                                  especiales (ESEITA negativo, FORSED y HORAZU
+                                  con committed)
+    verificado_por_relectura      true
+    documento                     "docs/INCIDENTE-SHOPIFY-TRANSFERS-2026-09-06.txt"
+
+5.3 BITACORA FINAL DE AMBAS TRANSFERENCIAS
+--------------------------------------------------------------------------------
+  #EC3C2698
+    2026-09-01T12:46:55 -07  transfer_created
+    2026-09-01T15:24:19 -07  shopify_transfer_create_error
+    2026-09-01T15:24:19 -07  shopify_sync_error
+    2026-09-01T15:24:19 -07  transfer_received
+    2026-09-06T14:40:16 -07  shopify_backfill_direct_adjust      <-- nuevo
+
+  #973F32BF
+    2026-09-01T12:48:33 -07  transfer_created
+    2026-09-01T15:24:39 -07  shopify_transfer_create_error
+    2026-09-01T15:24:39 -07  shopify_sync_error
+    2026-09-01T15:24:39 -07  transfer_received
+    2026-09-06T14:44:41 -07  shopify_backfill_direct_adjust      <-- nuevo
+
+5.4 LO QUE NO SE MODIFICO — VERIFICADO POR RELECTURA
+--------------------------------------------------------------------------------
+  Las 14 filas de transfer_lines (4 de #EC3C2698 + 10 de #973F32BF):
+
+    shopify_transfer_id  = NULL   en las 14   (todas NULL = true)
+    status               = 'validated' en las 14
+    odoo_transfer_id     = WH/INT/00314 / WH/INT/00315, sin cambios
+
+  DEJAR shopify_transfer_id EN NULL ES DELIBERADO: refleja la realidad de que
+  no existe ninguna transferencia en Shopify para estos registros. Rellenarlo
+  con algo inventado habria falseado la auditoria.
+
+
+================================================================================
+6. NOTA DE METODO — POR QUE LA RELECTURA NO ERA OPCIONAL
+================================================================================
+
+  En la tanda de Conquista la mutacion devolvio `quantityAfterChange = null` en
+  las 8 entradas de cambio, PESE A que `userErrors` vino vacio. Fiarse de la
+  respuesta de la mutacion no habria confirmado absolutamente nada sobre las
+  cantidades resultantes.
+
+  TODA la verificacion de cantidades de este documento proviene de RELECTURAS
+  INDEPENDIENTES posteriores a la escritura, no de la respuesta de la
+  escritura. Mismo criterio aplicado en las dos tandas.
+
+  Decision de diseño: UNA SOLA LLAMADA ATOMICA POR TANDA en vez de N llamadas
+  sueltas. El compare-and-swap sigue operando por linea (cada change lleva su
+  propio changeFromQuantity), pero se elimina el riesgo de quedar en estado
+  parcial si algo falla a media secuencia. Es tambien el patron que usa
+  adjustShopifyPlantaInventory en la Edge Function.
+
+
+================================================================================
+7. ESTADO DE CIERRE
+================================================================================
+
+  PUNTO 1 — 3 IDs corruptos en Odoo ............ CERRADO
+            x_shopify_inventory_item_id reparado y verificado en
+            PER-CABGLO-100, PER-ELEETE-100 y PER-ESEITA-100.
+            Detalle en PARTE 2 del documento forense.
+
+  PUNTO 2 — 448 unidades en Shopify ............ CERRADO
+            152 u en Conquista + 296 u en Ceiba, repuestas y verificadas.
+
+  Odoo ......................................... sin tocar en el punto 2.
+            Pickings 42309 y 42310 siguen 'done' e intactos.
+  Shopify Planta ............................... sin tocar. Cero doble conteo.
+  Supabase status/odoo_transfer_id/shopify_transfer_id ... sin cambios.
+
+  TOTALES DE LA INTERVENCION
+    Lineas ajustadas ....................... 14 de 14  (4 + 10)
+    Unidades repuestas ..................... 448       (152 + 296)
+    userErrors ............................. 0
+    Discrepancias contra lo esperado ....... 0
+    Escrituras en Odoo ..................... 0
+    Escrituras en Planta ................... 0
+    AdjustmentGroups creados ............... 2
+    Eventos de auditoria en Supabase ....... 2
+
+
+================================================================================
+8. PENDIENTES ANOTADOS — SIN ACCION EN ESTA TAREA
+================================================================================
+
+8.1 ATENCION — POSIBLE DESCUADRE ADICIONAL NO INVESTIGADO
+--------------------------------------------------------------------------------
+  Las TRES transferencias de 2026-02-26 siguen 'validated' a tienda con
+  shopify_transfer_id NULL, exactamente igual que estaban estas dos:
+
+      d9f6450c   WH/INT/00213   P-CEI/Existencias
+      9f3e57da   WH/INT/00210   P-CEI/Existencias
+      f33e4639   WH/INT/00212   P-CEI/Existencias
+
+  Su CAUSA DE CODIGO quedo resuelta en su momento (errores de
+  "Directive @idempotent is not defined" e "InventoryTransferCreateInput isn't
+  a defined input type"). PERO NUNCA SE VERIFICO si sus unidades llegaron a
+  reflejarse en Shopify.
+
+  PUEDE HABER UN DESCUADRE ADICIONAL AHI. No se investigo por quedar fuera del
+  alcance autorizado. RECOMENDADO REVISARLO.
+
+8.2 DESFASE DE PLANTA EN LOS 3 SKUs REPARADOS
+--------------------------------------------------------------------------------
+      SKU              Shopify Planta   Odoo WH(8)
+      PER-CABGLO-100          0             10
+      PER-ELEETE-100          0             10
+      PER-ESEITA-100          0              9
+
+  Desfase PREVIO al incidente; no lo genero esta operacion. Ahora que los
+  x_shopify_inventory_item_id estan arreglados, deberia curarse solo en el
+  proximo stock.move 'done' de cada SKU, via la automatizacion ACTIVA
+  "Sincronizar Inventario a Shopify (stock.move)". Si no se quiere esperar, se
+  corrige aparte.
+
+8.3 SIETE SKUs DE 30 ML CON DESFASES AJENOS AL INCIDENTE
+--------------------------------------------------------------------------------
+      PER-FUEIMP-30   odooWH= 0   shopifyPlanta= 40   delta +40
+      PER-DOMSUP-30   odooWH= 0   shopifyPlanta=-39   delta -39
+      PER-SUSCOS-30   odooWH= 0   shopifyPlanta= 38   delta +38
+      PER-VICMAG-30   odooWH=29   shopifyPlanta=  0   delta -29
+      PER-EMPOSC-30   odooWH=21   shopifyPlanta=  0   delta -21
+      PER-HORAZU-30   odooWH=20   shopifyPlanta=  0   delta -20
+      PER-VERINF-30   odooWH=10   shopifyPlanta=  0   delta -10
+
+  Causa no investigada. Sin relacion con este incidente.
+
+8.4 LO DE FONDO — LOS DEFECTOS DE CODIGO SIGUEN VIVOS
+--------------------------------------------------------------------------------
+  Reparar los datos y reponer el inventario NO REPARA EL MECANISMO. El proximo
+  x_shopify_inventory_item_id mal capturado vuelve a producir exactamente la
+  misma perdida silenciosa: mutacion atomica que falla completa, HTTP 200,
+  pantalla verde para el operador y descuadre invisible.
+
+  Defectos vigentes en produccion (detalle en 1.6 del documento forense):
+    (a) routes-transfer.ts:537  fallback todo-o-nada, y solo cubre "campo
+        vacio", no "campo con valor invalido"
+    (b) routes-transfer.ts:589 + ReceivePage.tsx:231  el error de Shopify se
+        registra pero nunca llega a la UI
+    (c) no existe endpoint de reintento ni resync
+    (d) la idempotencia esta muerta: las claves se calculan y no se usan
+
+  Blindaje sugerido:
+    · validar los inventoryItemId contra Shopify antes de mandar la mutacion
+    · fallback por-SKU en vez de todo-o-nada, cubriendo valores invalidos
+    · que /receive devuelva el fallo de Shopify y que ReceivePage lo pinte
+    · endpoint de reintento para el tramo Shopify
+    · recuperar la idempotencia
+
+
+================================================================================
+9. TRAZABILIDAD PARA AUDITORIA POSTERIOR
+================================================================================
+
+  EN SHOPIFY
+    Los ajustes aparecen atribuidos a la app "Shopify Claude Connector App",
+    con reason "correction", en dos AdjustmentGroups:
+      77648889708856   2026-09-06T21:38:59Z   Conquista   4 lineas   +152
+      77648974840120   2026-09-06T21:43:55Z   Ceiba      10 lineas   +296
+    Cada uno con referenceDocumentUri apuntando al UUID de su transferencia:
+      urn:aromante:wh-transfers:transfer:ec3c2698-3e51-4d31-9e94-6a8b28d71c60
+      urn:aromante:wh-transfers:transfer:973f32bf-36aa-4646-8372-3d8bb8a3b4ad
+
+  EN SUPABASE
+    transfer_logs, evento shopify_backfill_direct_adjust, uno por transferencia.
+
+  EN ODOO
+    Nada. Los pickings WH/INT/00314 y WH/INT/00315 son el registro del
+    movimiento fisico real y no se tocaron.
+
+  LIMITACION CONOCIDA
+    En el historial de Shopify esto NO se lee como una transferencia entre
+    ubicaciones sino como un ajuste de inventario. Es el trade-off aceptado
+    explicitamente. Quien audite el movimiento fisico debe cruzarlo con el
+    picking de Odoo y con transfer_logs.
+
+================================================================================
+FIN DEL ACTA
+================================================================================

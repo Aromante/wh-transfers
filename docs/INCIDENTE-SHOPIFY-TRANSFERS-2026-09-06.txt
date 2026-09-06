@@ -1,0 +1,914 @@
+================================================================================
+INCIDENTE — TRANSFERENCIAS VALIDADAS EN LA APP QUE NUNCA LLEGARON A SHOPIFY
+Transferencias #973F32BF y #EC3C2698 · 2026-09-01
+Documento: diagnostico + correccion aplicada + reposicion ejecutada
+Fecha del documento: 2026-09-06
+Medido en PRODUCCION (Supabase, Odoo, Shopify). Solo lectura salvo lo indicado
+explicitamente en las PARTES 2 y 4.
+ESTADO: INCIDENTE CERRADO (ver PARTE 4). La PARTE 3 quedo SUPERSEDIDA.
+================================================================================
+
+RESUMEN EN CINCO LINEAS
+--------------------------------------------------------------------------------
+  1. Tres productos tenian guardado en Odoo un ProductVariant ID de Shopify en
+     el campo que debe llevar el InventoryItem ID.
+  2. Shopify rechazo el `inventoryTransferCreate` completo. La mutacion es
+     atomica: no se creo NADA en Shopify, ni siquiera las lineas sanas.
+  3. La Edge Function devolvio HTTP 200 igual, y la app pinto pantalla verde.
+  4. Odoo si movio el stock. Shopify no. Descuadre: 448 unidades.
+  5. Los 3 IDs quedaron reparados y verificados (PARTE 2), y las 448 unidades
+     quedaron repuestas en Shopify por ajuste directo (PARTE 4). Cerrado.
+
+
+================================================================================
+PARTE 0 — ARQUITECTURA REAL (correccion de premisas)
+================================================================================
+
+Dos premisas con las que se arranco la investigacion resultaron falsas. Se
+documentan porque cualquiera que retome esto va a tropezar con lo mismo.
+
+0.1 EL CODIGO DE PRODUCCION NO ES EL WORKER DE CLOUDFLARE
+--------------------------------------------------------------------------------
+  El repo local estaba en el commit 2672f5e (nov-2025) y contiene un Cloudflare
+  Worker en `worker/src/index.js`. ESO NO ES PRODUCCION.
+
+  Produccion es una SUPABASE EDGE FUNCTION llamada `transfers`, version v48,
+  cuyo codigo vive en `supabase/functions/transfers/` de la rama `origin/main`
+  (commit d09b21c, 2026-04-06).
+
+    · rama de produccion : main       (origin/master es una copia rezagada, v45)
+    · repo               : github.com:Aromante/wh-transfers.git
+    · historial de EF    : supabase/ef-history/transfers/transfers_v45|v46|v47/
+
+  El repo local se puso al dia el 2026-09-06 (fast-forward 2672f5e -> d09b21c,
+  48 altas / 10 modificaciones / 0 bajas, sin conflictos).
+
+0.2 EL ESQUEMA DE SUPABASE TAMPOCO ES EL DEL REPO VIEJO
+--------------------------------------------------------------------------------
+  NO existen las tablas `transfers` ni `shopify_transfer_drafts`. Hoy son:
+
+    transfer_lines      una fila por SKU, con TODAS las columnas de cabecera
+                        repetidas (origin_id, dest_id, status, odoo_transfer_id,
+                        shopify_transfer_id, origin_shopify_id, dest_shopify_id,
+                        kroni_reception_id)
+    transfer_logs       bitacora (transfer_id, ts, event, detail jsonb)
+    transfer_summary    VISTA agregada sobre transfer_lines
+    transfer_boxes      catalogo de cajas escaneables
+    transfer_locations  mapeo Odoo <-> Shopify (odoo_location_code, gid, ...)
+    transfer_transit    agregado de unidades en transito
+
+  Proyecto Supabase: bszfkudigjiqddliicri
+
+0.3 EL FLUJO DE DOS PASOS
+--------------------------------------------------------------------------------
+  PASO "ENVIO"     POST /  o  /create   -> SOLO inserta en Supabase.
+                                           NO toca Odoo. NO toca Shopify.
+  PASO "RECEPCION" POST /receive        -> crea y valida el picking en Odoo,
+                                           y DESPUES sincroniza con Shopify.
+
+  Todo el trabajo externo ocurre en la recepcion. Por eso el fallo se refleja
+  ahi y no en el envio.
+
+
+================================================================================
+PARTE 1 — DIAGNOSTICO
+================================================================================
+
+1.1 IDENTIFICACION DE LAS DOS TRANSFERENCIAS
+--------------------------------------------------------------------------------
+  Los IDs cortos que muestra la app son los primeros 8 hex del UUID.
+
+  ------------------------------------------------------------------------------
+                        #973F32BF                    #EC3C2698
+  ------------------------------------------------------------------------------
+  transfer_id     973f32bf-36aa-4646-          ec3c2698-3e51-4d31-
+                  8372-3d8bb8a3b4ad            9e94-6a8b28d71c60
+  origen          WH/Existencias               WH/Existencias
+  destino         P-CEI/Existencias (Ceiba)    P-CON/Existencias (Conquista)
+  odoo ids        origin 8 -> dest 36          origin 8 -> dest 28
+  status          validated                    validated
+  odoo_transfer   WH/INT/00315                 WH/INT/00314
+  odoo_picking    42310                        42309
+  shopify_transfer_id   N U L L                N U L L
+  SKUs / unidades 10 / 296                     4 / 152
+  creada          2026-09-01 12:48:33 -07:00   2026-09-01 12:46:55 -07:00
+  recibida        2026-09-01 15:24:39 -07:00   2026-09-01 15:24:19 -07:00
+  ------------------------------------------------------------------------------
+
+  LINEAS DE #973F32BF (296 u)        LINEAS DE #EC3C2698 (152 u)
+    BOL-KRAFT          80              BOL-KRAFT          80
+    PER-AURMIS-100     24              PER-CABGLO-100     24
+    PER-CABGLO-100     24              PER-ELEETE-100     24
+    PER-ELEETE-100     24              PER-ESEITA-100     24
+    PER-ELEROM-100     24
+    PER-ESEDIV-100     24
+    PER-ESEITA-100     24
+    PER-FORSED-100     24
+    PER-HORAZU-100     24
+    PER-SUSCOS-100     24
+
+1.2 LA EVIDENCIA CRUDA — transfer_logs
+--------------------------------------------------------------------------------
+  #973F32BF
+    2026-09-01 12:48:33.919 -07  transfer_created
+        {"lines":10,"dest_id":"P-CEI/Existencias","origin_id":"WH/Existencias",
+         "total_qty":296}
+
+    2026-09-01 15:24:39.341 -07  shopify_transfer_create_error
+        error: "empty_transfer_id"
+        userErrors:
+          [{"field":["input","lineItems","2","inventoryItemId"],
+            "message":"The inventory item could not be found."},
+           {"field":["input","lineItems","3","inventoryItemId"],
+            "message":"The inventory item could not be found."},
+           {"field":["input","lineItems","6","inventoryItemId"],
+            "message":"The inventory item could not be found."}]
+
+    2026-09-01 15:24:39.371 -07  shopify_sync_error
+        {"error":"inventoryTransferCreate devolvio id vacio"}
+
+    2026-09-01 15:24:39.409 -07  transfer_received
+        {"state":"done","pickingId":42310,"pickingName":"WH/INT/00315",
+         "received_lines":10,"total_qty":296,
+         "shopify":{"error":"inventoryTransferCreate devolvio id vacio",
+                    "synced":0,"skipped":0}}
+
+  #EC3C2698 — identico a las 15:24:19, con indices de linea 1, 2 y 3.
+
+  MAPEO DE LOS INDICES A SKU
+    Los lineItems se construyen iterando `itemQtyMap`, cuyo orden de insercion
+    es el de `linesBySku`. Resultado:
+
+      #973F32BF (10 lineas): idx 2, 3, 6  ->  CABGLO, ELEETE, ESEITA
+      #EC3C2698 ( 4 lineas): idx 1, 2, 3  ->  CABGLO, ELEETE, ESEITA
+
+    Los MISMOS TRES SKUs en ambas. Coincide 1:1 con la auditoria de Odoo del
+    punto 1.4, hecha por otro camino. Dos evidencias independientes.
+
+1.3 ODOO — el picking quedo bien
+--------------------------------------------------------------------------------
+  42309  WH/INT/00314  state=done  date_done=2026-09-01 22:24:18 UTC
+         WH/Existencias(8) -> P-CON/Existencias(28)   4 moves
+         origin="transfer/ec3c2698-3e51-4d31-9e94-6a8b28d71c60"
+
+  42310  WH/INT/00315  state=done  date_done=2026-09-01 22:24:38 UTC
+         WH/Existencias(8) -> P-CEI/Existencias(36)  10 moves
+         origin="transfer/973f32bf-36aa-4646-8372-3d8bb8a3b4ad"
+
+  Nada anomalo: cantidades, productos y ubicaciones correctos, ambos lados
+  'done'. El campo `origin` correlaciona con Supabase. El rechazo de Shopify NO
+  viene del picking.
+
+1.4 CAUSA RAIZ — tres IDs equivocados en Odoo
+--------------------------------------------------------------------------------
+  El puente Odoo->Shopify a nivel producto es UN SOLO campo:
+
+      product.product.x_shopify_inventory_item_id
+      tipo char · store=true · readonly=false · creado con Odoo Studio
+      etiqueta "Shopify Inventory ID" · SIN validacion de tipo ni de formato
+
+  Tres productos tenian ahi el ProductVariant ID en lugar del InventoryItem ID:
+
+  ------------------------------------------------------------------------------
+  SKU              guardado (malo)      que es           correcto
+  ------------------------------------------------------------------------------
+  PER-CABGLO-100   52825562841400       Variant ID       54897981882680
+  PER-ELEETE-100   52224875594040       Variant ID       54286740652344
+  PER-ESEITA-100   52825576210744       Variant ID       54897995055416
+  ------------------------------------------------------------------------------
+
+  Los tres escritos el 2026-08-27 23:59:12 UTC por write_uid=[2,"Admin"].
+
+  VENTANA TEMPORAL QUE LO CONFIRMA
+    2026-08-26 16:35  ultima transferencia a tienda que SI funciono (WH/INT/00310)
+    2026-08-27 23:59  se escriben los 3 IDs malos
+    2026-09-01 15:24  fallan las dos transferencias
+
+  EL LOTE COMPLETO DE ESE SEGUNDO
+    A las 23:59:12 se escribieron SIETE productos: CABGLO, ELEETE, ESEITA,
+    ELEROM, ELEINT, ESEREB y GLOLAY. Cuatro quedaron bien y tres mal. Eso
+    descarta un script defectuoso: fue captura manual con tres copiados del
+    campo equivocado.
+
+1.5 AUDITORIA DE ALCANCE DEL MAPEO
+--------------------------------------------------------------------------------
+  Productos Odoo con x_shopify_inventory_item_id poblado : 130
+    OK   (el valor es un inventory_item_id real)         : 127
+    BAD  (el valor es un variant_id)                     :   3   <- los de arriba
+    UNKNOWN (no resuelve contra el catalogo)             :   0
+    IDs duplicados entre dos productos                   :   0
+    Valores con formato no numerico                      :   0
+
+1.6 LOS TRES DEFECTOS DE CODIGO QUE CONVIERTEN UN DATO MALO EN PERDIDA SILENCIOSA
+--------------------------------------------------------------------------------
+  (a) EL FALLBACK ES TODO-O-NADA
+      supabase/functions/transfers/routes-transfer.ts:537
+
+        if (itemQtyMap.size === 0 && linesBySku.size > 0) {   // solo si fallan TODOS
+            const missingSkus = [...].filter(sku => !prodMap.get(sku)?.shopify_inventory_item_id)
+            const shopifyVariants = await resolveVariantsBatch(...)
+
+      El fallback que resuelve IDs directo desde Shopify (commit 0d8aa09) solo
+      se dispara si el mapa quedo VACIO. Aqui 7 de 10 resolvieron bien, asi que
+      nunca corrio. Ademas solo cubre el caso "campo vacio", no "campo con
+      basura": un ID presente pero invalido pasa derecho hasta Shopify.
+
+  (b) EL ERROR SE TRAGA HACIA EL USUARIO
+      routes-transfer.ts:589 captura la excepcion, la escribe en transfer_logs
+      y sigue. La respuesta sale con HTTP 200, status='validated' y
+      message="Picking WH/INT/00315 creado en Odoo (done)".
+
+      src/pages/ReceivePage.tsx:231
+        if (r.ok) setResult({ ok: true, ... })
+
+      `d.shopify.error` NO SE LEE EN NINGUNA PARTE. El operador vio pantalla
+      verde. El log esta bien hecho; lo que falta es que el fallo llegue a la UI.
+
+  (c) NO HAY REINTENTO NI RESYNC
+      Rutas de la EF (index.ts:52-104):
+        POST / , /create , /receive , /cancel
+        GET  /transfer , /history , /history/csv , /logs , /resolve , /locations
+        GET|POST|PATCH|DELETE /boxes*
+        POST /webhook/shopify-transfer , /webhook/register
+        POST /shopify/adjust-planta
+        GET  /health
+      No existe endpoint de reintento. Una vez que /receive responde, la
+      transferencia queda 'validated' para siempre, sin camino de recuperacion.
+
+  (d) BONUS — IDEMPOTENCIA MUERTA
+      shopify.ts calcula createKey, readyKey, shipmentKey, inTransitKey y
+      receiveKey con deriveIdempotencyKey(...) y NINGUNA se usa en las
+      mutaciones. El @idempotent se quito tras los errores de feb-2026 y quedo
+      el calculo huerfano. No hay proteccion contra duplicados.
+
+1.7 HIPOTESIS DESCARTADA: CAMBIO DE API 2025-10
+--------------------------------------------------------------------------------
+  DESCARTADA. La EF usa DEFAULT_API_VERSION='2025-10' y las cinco mutaciones
+  funcionaron sin problema el 25 y el 26 de agosto. El ultimo commit del repo
+  es del 2026-04-06. El codigo NO cambio entre las transferencias buenas y las
+  malas. Cambio el dato en Odoo.
+
+1.8 ALCANCE REAL
+--------------------------------------------------------------------------------
+  Barrido de las 118 transferencias del historial:
+
+    validated · destino tienda · sin shopify_transfer_id  ->  5
+      2026-09-01  973f32bf   <- ESTE incidente
+      2026-09-01  ec3c2698   <- ESTE incidente
+      2026-02-26  d9f6450c   causa distinta: "Directive @idempotent is not defined"
+      2026-02-26  9f3e57da   causa distinta: "InventoryTransferCreateInput isn't
+                             a defined input type"
+      2026-02-26  f33e4639   causa distinta: @idempotent
+    Las tres de febrero son errores de version/directiva ya resueltos.
+
+    Transferencias a KRONI: 48, todas con shopify_transfer_id='planta_adjusted'.
+    Van por otro camino (adjustShopifyPlantaInventory) y no aplican.
+
+  VEREDICTO: ni "2 casos aislados" ni "patron ya activo". Era un PATRON LATENTE.
+  Solo se ven 2 casos porque entre el 27-ago (envenenamiento del dato) y el
+  06-sep solo hubo esas 2 transferencias a tienda. Cualquier transferencia
+  futura que incluyera uno de esos 3 SKUs habria fallado COMPLETA, arrastrando
+  tambien los SKUs sanos del mismo envio.
+
+1.9 DESCUADRE CUANTIFICADO
+--------------------------------------------------------------------------------
+  Unidades que Odoo movio y Shopify nunca registro: 448
+
+    a Ceiba     (#973F32BF)  296   BOL-KRAFT 80 + 9 perfumes x 24
+    a Conquista (#EC3C2698)  152   BOL-KRAFT 80 + 3 perfumes x 24
+
+  CONFIRMACION EN EL INVENTARIO REAL DE SHOPIFY
+    SKU               Odoo CON / Shopify Conq.   Odoo CEI / Shopify Ceiba
+    PER-CABGLO-100        24 /  0                    24 /  0
+    PER-ELEETE-100        24 /  0                    24 /  0
+    PER-ESEITA-100        24 /  0                    24 / -1
+
+  El -1 de ESEITA en Ceiba es venta real contra stock que Shopify nunca supo
+  que habia llegado.
+
+1.10 LIMITACIONES DE LA INVESTIGACION (declaradas)
+--------------------------------------------------------------------------------
+  · No se pudieron leer los logs de invocacion de la Edge Function: el MCP de
+    Supabase de la sesion ve otra organizacion; bszfkudigjiqddliicri responde
+    "You do not have permission". Se compenso con transfer_logs, que registra
+    la respuesta cruda de Shopify. Queda respondido lo importante: la funcion
+    SI se invoco, SI llamo a Shopify y Shopify SI contesto. No fue timeout ni
+    rate limit ni 4xx/5xx de transporte: fue HTTP 200 con userErrors.
+  · No se pudo listar `inventoryTransfers` en Shopify: el token del MCP carece
+    del scope read_inventory_transfers. La confirmacion de que no existe la
+    transferencia es indirecta pero convergente: userErrors sin ID +
+    shopify_transfer_id NULL + inventario destino sin las unidades.
+
+
+================================================================================
+PARTE 2 — CORRECCION APLICADA (2026-09-06)  ***ESCRITURA EN PRODUCCION***
+================================================================================
+
+Alcance de esta parte: reparar los 3 x_shopify_inventory_item_id en Odoo. Nada
+mas. No se ejecuto ninguna transferencia de prueba ni se reprocesaron las 2
+transferencias fallidas.
+
+2.1 REVALIDACION EN VIVO CONTRA SHOPIFY (antes de escribir)
+--------------------------------------------------------------------------------
+  No se confio en la tabla del diagnostico. Se resolvio de cero por SKU y se
+  hizo el round-trip inverso (inventoryItem.sku e inventoryItem.variant.id)
+  para descartar cruces.
+
+  SKU (Odoo)      Variant          InventoryItem     inventoryItem.sku  Estado
+  PER-CABGLO-100  52825562841400   54897981882680    PER-CABGLO-100 OK  ACTIVE/tracked
+  PER-ELEETE-100  52224875594040   54286740652344    PER-ELEETE-100 OK  ACTIVE/tracked
+  PER-ESEITA-100  52825576210744   54897995055416    PER-ESEITA-100 OK  ACTIVE/tracked
+
+  Queda confirmado que el valor que estaba en Odoo era, exactamente, el
+  ProductVariant ID de esa misma variante.
+
+2.2 SNAPSHOT ANTES  (199 campos por producto — archivo snapshot_before.json)
+--------------------------------------------------------------------------------
+  { id:3334, default_code:"PER-CABGLO-100",
+    display_name:"[PER-CABGLO-100] Caballero Glorioso (100 ML)",
+    active:true, type:"consu", categ_id:[2,"Ready 2 Sell"], uom_id:[1,"Units"],
+    qty_available:58, barcode:false, list_price:516.3793103448277,
+    standard_price:29.5625,
+    x_shopify_inventory_item_id:"52825562841400",
+    create_date:"2026-08-19 21:36:36", write_date:"2026-08-27 23:59:12" }
+
+  { id:3322, default_code:"PER-ELEETE-100",
+    display_name:"[PER-ELEETE-100] Elegancia Eterna (100 ML)",
+    active:true, type:"consu", categ_id:[2,"Ready 2 Sell"], uom_id:[1,"Units"],
+    qty_available:58, barcode:false, list_price:257.76,
+    standard_price:29.5625,
+    x_shopify_inventory_item_id:"52224875594040",
+    create_date:"2026-08-19 21:01:12", write_date:"2026-08-27 23:59:12" }
+
+  { id:3309, default_code:"PER-ESEITA-100",
+    display_name:"[PER-ESEITA-100] Esencia Italiana (100 ML)",
+    active:true, type:"consu", categ_id:[2,"Ready 2 Sell"], uom_id:[1,"Units"],
+    qty_available:57, barcode:false, list_price:257.76,
+    standard_price:29.5625,
+    x_shopify_inventory_item_id:"52825576210744",
+    create_date:"2026-08-19 20:55:32", write_date:"2026-08-27 23:59:12" }
+
+  Definicion del campo leida en vivo:
+    {"type":"char","store":true,"readonly":false,"string":"Shopify Inventory ID"}
+  Los valores son STRINGS -> se escribieron strings, para no cambiar el tipo.
+
+2.3 ESCRITURA
+--------------------------------------------------------------------------------
+  Instancia: aromantemx.odoo.com / db aromante-aromante-master-20090002
+  Confirmado que es PRODUCCION por ser la misma instancia donde viven los
+  pickings reales WH/INT/00314 y WH/INT/00315.
+
+  Guardas previas por cada registro, antes de cada write:
+    · releer el registro y abortar si default_code != el esperado
+    · abortar si el valor actual != el valor malo conocido
+
+  Resultado:
+    PER-CABGLO-100   odoo#3334  write=true  52825562841400 -> 54897981882680
+    PER-ELEETE-100   odoo#3322  write=true  52224875594040 -> 54286740652344
+    PER-ESEITA-100   odoo#3309  write=true  52825576210744 -> 54897995055416
+
+2.4 SNAPSHOT DESPUES + DIFF  (archivo snapshot_after.json)
+--------------------------------------------------------------------------------
+  --- PER-CABGLO-100 (odoo#3334) : 199 campos comparados, 2 cambios ---
+      write_date                  : "2026-08-27 23:59:12" -> "2026-09-06 20:55:49"
+      x_shopify_inventory_item_id : "52825562841400"      -> "54897981882680"
+  --- PER-ELEETE-100 (odoo#3322) : 199 campos comparados, 2 cambios ---
+      write_date                  : "2026-08-27 23:59:12" -> "2026-09-06 20:55:50"
+      x_shopify_inventory_item_id : "52224875594040"      -> "54286740652344"
+  --- PER-ESEITA-100 (odoo#3309) : 199 campos comparados, 2 cambios ---
+      write_date                  : "2026-08-27 23:59:12" -> "2026-09-06 20:55:50"
+      x_shopify_inventory_item_id : "52825576210744"      -> "54897995055416"
+  TOTAL cambios: 6
+
+  SOLO el campo objetivo y write_date (que Odoo mueve solo). qty_available,
+  list_price, standard_price, categ_id, uom_id, active, barcode y create_date
+  quedaron identicos en los tres.
+
+2.5 VERIFICACION FUNCIONAL (read-only, sin ejecutar mutaciones)
+--------------------------------------------------------------------------------
+  Se construyo el GID exactamente como lo hace la EF y se resolvio con node():
+
+    InventoryItem/54897981882680  -> InventoryItem, sku PER-CABGLO-100,
+                                     tracked:true, variante correcta,
+                                     con niveles en las 4 ubicaciones
+    InventoryItem/54286740652344  -> InventoryItem, sku PER-ELEETE-100, tracked
+    InventoryItem/54897995055416  -> InventoryItem, sku PER-ESEITA-100, tracked
+
+    InventoryItem/52825562841400 (viejo) -> null
+    InventoryItem/52224875594040 (viejo) -> null
+    InventoryItem/52825576210744 (viejo) -> null
+
+  Los tres IDs viejos devuelven null como InventoryItem. Esa es, literalmente,
+  la condicion que producia "The inventory item could not be found". Diagnostico
+  confirmado y correccion probada sin ejecutar ninguna mutacion.
+
+2.6 BARRIDO EN BUSCA DE UN CUARTO CASO
+--------------------------------------------------------------------------------
+  Re-auditoria hecha CONTRA SHOPIFY EN VIVO (no contra la cache
+  shopify_catalog), resolviendo los 130 valores con nodes() en 4 lotes:
+
+    130/130 resuelven como InventoryItem
+    130/130 el inventoryItem.sku coincide con el default_code de Odoo
+      0 IDs muertos · 0 cruces · 0 duplicados · 0 formatos raros
+
+  Altas recientes: 37 productos creados en Odoo desde 2026-08-01. De esos, solo
+  CUATRO son producto terminado vendible: los 3 corregidos mas BOL-KRAFT. Todos
+  mapeados y correctos. Los otros 33 son componentes (ESE-* esencias, PP-*
+  preformas, ETI-* etiquetas, BOX* cajas) y las presentaciones de 30 ml, que
+  estan active=false. Ninguno debe llevar mapeo a Shopify.
+
+  NO HAY CUARTO CASO.
+
+2.7 OBSERVACION FUERA DE ALCANCE
+--------------------------------------------------------------------------------
+  PER-CABGLO-100 tiene list_price 516.38 mientras ELEETE y ESEITA estan en
+  257.76. Estaba asi desde antes; no se toco. Se anota solo porque salto a la
+  vista en los snapshots.
+
+
+================================================================================
+PARTE 3 — PLAN PARA REPONER LAS 448 UNIDADES  (SUPERSEDIDO — NO SE EJECUTO)
+================================================================================
+  *** ESTE PLAN NO SE EJECUTO. Se conserva por su valor de analisis: aqui esta
+  *** la investigacion que descubrio que Planta YA estaba descontada (3.0), la
+  *** semantica de las mutaciones de transferencia de Shopify (3.3) y el
+  *** bloqueador de scopes (3.6). El responsable opto por la via de la PARTE 4:
+  *** ajuste directo en destino, aceptando explicitamente perder la trazabilidad
+  *** de "fue una transferencia" en el historial de Shopify.
+
+
+Objetivo pedido: reponer 296 en Ceiba y 152 en Conquista REPLICANDO LA
+TRANSFERENCIA REAL (no un ajuste directo), para que quede trazable en el
+historial de Shopify como lo que fue.
+
+3.0 EL HALLAZGO QUE CAMBIA EL PLANTEAMIENTO
+--------------------------------------------------------------------------------
+  EL INVENTARIO DE PLANTA EN SHOPIFY YA ESTA DESCONTADO.
+
+  Comparacion de los 130 SKUs mapeados, Odoo WH/Existencias(8) contra Shopify
+  "1 - Aromante Planta Productora":
+
+      IGUALES: 120 / 130       DISTINTOS: 10
+
+  En los 10 SKUs de nuestras transferencias, 7 coinciden EXACTAMENTE:
+      BOL-KRAFT 3040=3040 · AURMIS 44=44 · ELEROM 12=12 · ESEDIV 17=17
+      FORSED 10=10 · HORAZU 22=22 · SUSCOS 8=8
+  Los 3 restantes son los reparados, en 0 en Shopify contra 10/10/9 en Odoo,
+  porque el ID roto tambien impedia que se sincronizaran.
+
+  MECANISMO, verificado en Odoo (base.automation):
+      [ON ] "Sincronizar Inventario a Shopify (stock.move)"
+            model = stock.move · trigger = on_create_or_write
+            domain = ["&", ("state","=","done"), ("product_id.categ_id","=",2)]
+            accion = records.action_sync_shopify_inventory()
+
+      Los 10 SKUs son categoria 2 "Ready 2 Sell": los 10 califican.
+
+      Segun la documentacion interna del repo Aromante/Aromante, ese metodo
+      vive en perfume_product_automation/models/stock_quant_shopify.py y hace
+      un requests.post DIRECTO a inventory_levels/set.json de Shopify. Es un
+      SET ABSOLUTO, no un delta. (El Python no es legible por XML-RPC; este
+      punto se apoya en esa documentacion, no en medicion propia.)
+
+      Automatizaciones relacionadas encontradas:
+      [ON ] "Actualizacion inv shopify"  stock.quant -> webhook a n8n.
+            VIA HUERFANA: segun la auditoria de admin-compras, n8n ya no
+            participa. Nadie la apago.
+      [OFF] "Sincronizar Inventario a Shopify (Tiempo Real)"  stock.quant.
+            Desactivada 2026-02-23, sustituida por la de stock.move.
+
+  CONSECUENCIA: replicar la transferencia tal cual descuenta Planta POR SEGUNDA
+  VEZ. 448 unidades de menos en Planta. "Reponer 448 en destino" y "replicar la
+  transferencia" NO son la misma operacion: la transferencia mueve las dos
+  puntas y una de las dos ya se movio.
+
+3.1 PREGUNTA 1 — ¿EXISTE UN CAMINO AISLADO EN LA EDGE FUNCTION?
+--------------------------------------------------------------------------------
+  NO.
+
+  · syncShopifyTransfer() (shopify.ts:99) esta exportada, pero SOLO la llama
+    /receive, y /receive crea el picking en Odoo antes
+    (routes-transfer.ts:480-491). Invocarla duplicaria el picking. Descartado.
+  · /shopify/adjust-planta si es un tramo aislado, pero llama a
+    adjustShopifyPlantaInventory(), que hace inventoryAdjustQuantities sobre
+    PLANTA unicamente. Es ajuste directo, no transferencia, y no toca tiendas.
+    No sirve para el objetivo.
+  · No hay endpoint de reintento ni de resync.
+  · Recordatorio de 1.6(d): la idempotencia esta muerta. Cualquier script debe
+    llevar su propio candado.
+
+3.2 PREGUNTA 3 — FECHAS
+--------------------------------------------------------------------------------
+  SI SE PUEDE FECHAR AL 1 DE SEPTIEMBRE.
+
+  InventoryTransferCreateInput acepta:
+      dateCreated   : DateTime  ("If left blank, defaults to the current date
+                                  and time in UTC format")
+      note          : String
+      tags          : [String!]
+      referenceName : String
+  InventoryShipmentCreateInput acepta:
+      dateCreated   : DateTime
+      trackingInput.arrivesAt : DateTime
+
+  SALVEDAD HONESTA: dateCreated fecha EL DOCUMENTO, no el asiento de
+  inventario. El movimiento en el historial de ajustes de Shopify quedara
+  estampado con la fecha real de la llamada. Por eso el plan usa ademas note,
+  referenceName (el folio de Odoo) y tags, para que quien lo mire dentro de
+  seis meses entienda que es una reposicion tardia y no el movimiento fisico.
+
+  NO SE PUDO VERIFICAR si Shopify acepta una fecha pasada o la rechaza; la
+  documentacion no lo dice. Se probara en la primera transferencia y, si la
+  rechaza, se ejecuta sin dateCreated dejando la explicacion en note.
+
+  La EF actual no usa ninguno de estos cuatro campos: solo manda
+  originLocationId, destinationLocationId y lineItems.
+
+3.3 PREGUNTA 4 — DOBLE CONTEO
+--------------------------------------------------------------------------------
+  Sistema                  Se toca                        Riesgo
+  ------------------------------------------------------------------------------
+  Odoo                     NO. Ni un write, ni un picking  Ninguno. 42309/42310
+                                                           quedan done e intactos
+  Shopify destino          Si, +296 Ceiba / +152 Conquista Ninguno. Nada mas
+  (Ceiba, Conquista)                                       escribe ahi
+  Shopify origen (Planta)  -448 por el shipment,           NETO CERO. Aqui estaba
+                           +448 por la compensacion        el doble conteo real
+  Supabase                 shopify_transfer_id +           Ninguno. No se toca
+                           transfer_logs                   status ni odoo_transfer_id
+
+  RIESGO RESIDUAL QUE NO SE PUEDE ELIMINAR
+    La automatizacion de Odoo hace un SET ABSOLUTO de Planta cada vez que un
+    producto categoria 2 tiene un stock.move en done. Si eso ocurre en medio de
+    la secuencia, sobrescribe. Por eso los pasos van juntos y en segundos, y
+    por eso hay verificacion entre una transferencia y la otra.
+    Es el mismo "loop con la webapp de transferencias" que en feb-2026 obligo a
+    desactivar y reactivar esa automatizacion.
+
+  SEMANTICA DE SHOPIFY (confirmada en su documentacion)
+    inventoryTransferCreate        -> DRAFT. No mueve inventario.
+    markAsReadyToShip              -> retiene en origen (committed; migrado
+                                      desde reserved en ago-2026)
+    inventoryShipmentMarkInTransit -> origen on_hand BAJA, destino incoming SUBE
+    inventoryShipmentReceive       -> destino on_hand SUBE, incoming BAJA
+
+3.4 PREGUNTA 2 — EL SCRIPT ONE-SHOT
+--------------------------------------------------------------------------------
+  Lee de transfer_lines (que ya tiene sku, qty, origin_shopify_id=103584596280,
+  dest_shopify_id, odoo_transfer_id), resuelve los inventory_item_id desde Odoo
+  (ya reparados) y ejecuta POR TRANSFERENCIA:
+
+    PASO 0  GUARDA
+            · abortar si transfer_lines.shopify_transfer_id != NULL
+            · abortar si algun inventoryItemId no resuelve como InventoryItem
+            · abortar si la suma de qty != 152 / 296
+
+    PASO 1  COMPENSACION EN PLANTA
+            inventoryAdjustQuantities
+              reason:"correction", name:"available"
+              delta = +qty por SKU, locationId = Planta 103584596280
+              changeFromQuantity leido en vivo justo antes
+              referenceDocumentUri = UUID del transfer
+
+    PASO 2  inventoryTransferCreate(input:{
+              originLocationId, destinationLocationId, lineItems,
+              dateCreated: "2026-09-01T22:24:19Z",   // fecha real del picking
+              referenceName: "WH/INT/00314",
+              note: "Reposicion tardia por bug de mapeo
+                     (x_shopify_inventory_item_id). Movimiento fisico real:
+                     2026-09-01. Registrado en Shopify: <fecha de ejecucion>.",
+              tags: ["reposicion-bug","wh-transfers","ec3c2698"] })
+
+    PASO 3  inventoryTransferMarkAsReadyToShip(id)
+    PASO 4  inventoryShipmentCreate(input:{ movementId, lineItems,
+                                            dateCreated:"2026-09-01T22:24:19Z" })
+    PASO 5  inventoryShipmentMarkInTransit(id)      // Planta se descuenta aqui
+    PASO 6  inventoryShipmentReceive(id, lineItems:[{ shipmentLineItemId,
+                                                      quantity,
+                                                      reason: ACCEPTED }])
+                                                    // el destino recibe aqui
+    PASO 7  VERIFICACION
+            releer on_hand en Planta y en destino; abortar el resto si no cuadra
+
+    PASO 8  SUPABASE
+            PATCH transfer_lines?transfer_id=eq.<uuid>
+              { shopify_transfer_id: "gid://shopify/InventoryTransfer/<id>" }
+            INSERT transfer_logs:
+              shopify_backfill_planta_compensated {items, deltas}
+              shopify_transfer_created            {transferGid, dateCreated, note}
+              shopify_shipment_created            {shipmentGid, lineItemIds}
+              shopify_shipment_in_transit         {status}
+              shopify_sync_done                   {finalStatus:"RECEIVED",
+                                                   synced, skipped}
+              shopify_backfill_manual             {motivo, operador, fecha_real,
+                                                   fecha_registro}
+
+  POR QUE EL PASO 1 VA ANTES Y NO DESPUES
+    markAsReadyToShip retiene stock en origen. Con Planta en 0 para CABGLO,
+    ELEETE y ESEITA, retener 24 puede fallar o dejar negativos. Reponer primero
+    deja a Planta en su estado real del 1-sep y la transferencia lo vuelve a
+    bajar. Neto en Planta: cero. Ventana de exposicion: segundos.
+
+    Alternativa (correr primero y compensar despues): mismo resultado neto,
+    pero con riesgo de que markAsReadyToShip rechace por falta de stock.
+    NO RECOMENDADA.
+
+3.5 PREGUNTA 5 — ORDEN DE EJECUCION
+--------------------------------------------------------------------------------
+  PRIMERO Conquista #EC3C2698 (152 u, 4 lineas).
+  DESPUES Ceiba     #973F32BF (296 u, 10 lineas).
+
+  La razon no es el tamaño: las 4 lineas de Conquista incluyen LOS TRES SKUs
+  REPARADOS (CABGLO, ELEETE, ESEITA) mas BOL-KRAFT. Es el canario perfecto:
+  ejercita el 100% del riesgo con el 34% del volumen. Si Conquista sale limpia,
+  Ceiba es la misma mecanica con 6 SKUs sanos añadidos.
+
+  Entre una y otra: PARAR, verificar los on_hand de las dos puntas, y solo
+  entonces autorizar la segunda.
+
+3.6 BLOQUEADOR ANTES DE EJECUTAR
+--------------------------------------------------------------------------------
+  NO HAY UN TOKEN DE SHOPIFY DISPONIBLE CON PERMISOS DE TRANSFERENCIAS.
+
+  · La conexion MCP de Shopify de la sesion falla incluso en lectura:
+    "Access denied for inventoryTransfers field. Required access:
+     read_inventory_transfers". No tiene la familia de scopes.
+  · El token que si los tiene es SHOPIFY_ACCESS_TOKEN_TRANSFERS, un secret de
+    la Edge Function en el proyecto Supabase bszfkudigjiqddliicri, al que el MCP
+    de Supabase de la sesion no tiene acceso.
+  · Barrido de los .env locales de wh-transfers, admin-compras y conteo-bodega:
+    CERO tokens de Shopify.
+
+  Se necesita un token con write_inventory_transfers / read_inventory_transfers,
+  o que el script lo corra alguien con ese token en su entorno.
+
+  AVISO DE SEGURIDAD relacionado (viene de la auditoria de admin-compras): el
+  token de Shopify esta HARDCODEADO en texto plano en
+  perfume_product_automation/models/stock_quant_shopify.py del repo
+  Aromante/Aromante (y en su copia muerta stock_quant_shopify_og.py). Es una
+  via para obtenerlo, pero conviene ROTARLO y moverlo a variable de entorno, no
+  propagarlo.
+
+3.7 DECISIONES PENDIENTES DEL RESPONSABLE
+--------------------------------------------------------------------------------
+  1. ¿Se aprueba la compensacion en Planta? Sin ella, Planta queda 448 abajo
+     hasta que la automatizacion de Odoo la re-sincronice sola: plazo
+     impredecible por SKU, con riesgo de falsos agotados mientras tanto.
+  2. ¿Que version de API se usa? El default del codigo es 2025-10, pero
+     produccion lee SHOPIFY_API_VERSION de un secret no legible. Confirmarlo
+     permite replicar exactamente el comportamiento probado el 26-ago.
+  3. El token, segun 3.6.
+
+3.8 ANOTADO PARA NO PERDERLO (fuera de alcance del punto 2)
+--------------------------------------------------------------------------------
+  · En Planta, CABGLO/ELEETE/ESEITA siguen en 0 contra 10/10/9 en Odoo. Es un
+    desfase PREVIO, no lo crea esta operacion. Ahora que los IDs estan
+    arreglados deberia curarse solo en el proximo stock.move de cada SKU. Si no
+    se quiere esperar, se corrige aparte.
+  · Otros 7 SKUs con desfase Odoo/Planta detectados en el barrido:
+      PER-FUEIMP-30  odooWH=0   shopifyPlanta= 40   delta +40
+      PER-DOMSUP-30  odooWH=0   shopifyPlanta=-39   delta -39
+      PER-SUSCOS-30  odooWH=0   shopifyPlanta= 38   delta +38
+      PER-VICMAG-30  odooWH=29  shopifyPlanta=  0   delta -29
+      PER-EMPOSC-30  odooWH=21  shopifyPlanta=  0   delta -21
+      PER-HORAZU-30  odooWH=20  shopifyPlanta=  0   delta -20
+      PER-VERINF-30  odooWH=10  shopifyPlanta=  0   delta -10
+    Todos son presentaciones de 30 ml. Causa no investigada.
+  · La transferencia 273d12fa (WH->KRONI, 2026-08-27) lleva 10 dias en
+    'pending'. Sin relacion con este incidente, pero conviene mirarla.
+  · Los tres defectos de codigo de 1.6 siguen VIVOS en produccion. Reparar los
+    datos no repara el mecanismo: el proximo ID mal capturado vuelve a producir
+    una perdida silenciosa. Blindaje sugerido:
+      (a) validar los inventoryItemId contra Shopify antes de mandar la mutacion
+      (b) fallback por-SKU en vez de todo-o-nada, cubriendo tambien
+          "valor presente pero invalido"
+      (c) que /receive devuelva el fallo de Shopify y que ReceivePage lo pinte
+      (d) endpoint de reintento para el tramo Shopify
+      (e) recuperar la idempotencia (las claves ya se calculan y no se usan)
+
+
+================================================================================
+PARTE 4 — REPOSICION EJECUTADA (2026-09-06)  ***ESCRITURA EN PRODUCCION***
+================================================================================
+
+Decision del responsable: reponer por AJUSTE DIRECTO de inventario en destino
+en vez de replicar la transferencia. TRADE-OFF ACEPTADO EXPLICITAMENTE: se
+pierde la trazabilidad de "fue una transferencia" en el historial de Shopify;
+queda como ajuste manual de inventario, no como movimiento entre ubicaciones.
+
+4.1 POR QUE ESTA VIA SI ERA POSIBLE — LOS SCOPES
+--------------------------------------------------------------------------------
+  Consulta de solo lectura a currentAppInstallation sobre la conexion activa:
+
+      App: "Shopify Claude Connector App"
+      gid://shopify/AppInstallation/944475537720
+
+      write_inventory ............ CONCEDIDO
+      read_inventory ............. CONCEDIDO
+      read_locations / write_locations ... CONCEDIDO
+      read_inventory_transfers ... AUSENTE
+      write_inventory_transfers .. AUSENTE
+
+  Ahi esta la explicacion exacta de por que el plan de la PARTE 3 estaba
+  bloqueado y este no: SON FAMILIAS DE SCOPES DISTINTAS. inventoryTransfers es
+  su propia familia; inventoryAdjustQuantities cae bajo write_inventory.
+  Los scopes de Shopify NO estan acotados por ubicacion: write_inventory aplica
+  a las 4 ubicaciones por igual.
+
+  El endpoint /shopify/adjust-planta NO se uso: esta limitado a Planta POR
+  CODIGO, no por permisos (shopify.ts:327 hardcodea 'WH/Existencias', y
+  routes-misc.ts:138 solo acepta {sku, delta} sin ubicacion). Ademas usaria el
+  token de la EF, que no esta disponible. Se llamo inventoryAdjustQuantities
+  directamente, replicando el PATRON de adjustShopifyPlantaInventory
+  (misma mutacion, reason "correction", changeFromQuantity) con locationId de
+  destino.
+
+4.2 PRECISION TECNICA APLICADA — available, no on_hand
+--------------------------------------------------------------------------------
+  El compare-and-swap de Shopify exige que changeFromQuantity corresponda AL
+  MISMO ESTADO que se ajusta. Se ajusto name:"available", asi que el baseline
+  leido fue available, NO on_hand. La diferencia era real y habria roto el
+  compare-and-swap en dos lineas de Ceiba:
+
+      PER-FORSED-100   available 0   on_hand 1    (1 committed)
+      PER-HORAZU-100   available 8   on_hand 10   (2 committed)
+
+  Ajustar available sube tambien on_hand, que es lo que corresponde a
+  mercancia que llego fisicamente y es vendible. Las unidades committed
+  (pedidos sin surtir) se preservaron intactas.
+
+4.3 TANDA 1 — CONQUISTA #EC3C2698  (canario)
+--------------------------------------------------------------------------------
+  Ubicacion: gid://shopify/Location/80271802680
+  Ejecutado: 2026-09-06T21:38:59Z  ·  una sola llamada atomica, 4 lineas
+  AdjustmentGroup: gid://shopify/InventoryAdjustmentGroup/77648889708856
+  reason: "correction" · name: "available" · userErrors: []
+  referenceDocumentUri: urn:aromante:wh-transfers:transfer:ec3c2698-...
+
+  SKU               item_id           delta  avail antes -> despues  esperado OK
+  BOL-KRAFT         54893766246712     +80        18 ->  98             98  OK
+  PER-CABGLO-100    54897981882680     +24         0 ->  24             24  OK
+  PER-ELEETE-100    54286740652344     +24         0 ->  24             24  OK
+  PER-ESEITA-100    54897995055416     +24         0 ->  24             24  OK
+                                      ----
+                                      +152
+
+  on_hand siguio a available en los cuatro. committed e incoming en 0.
+
+4.4 TANDA 2 — CEIBA #973F32BF
+--------------------------------------------------------------------------------
+  Ubicacion: gid://shopify/Location/107414356280
+  Ejecutado: 2026-09-06T21:43:55Z  ·  una sola llamada atomica, 10 lineas
+  AdjustmentGroup: gid://shopify/InventoryAdjustmentGroup/77648974840120
+  reason: "correction" · name: "available" · userErrors: []
+  referenceDocumentUri: urn:aromante:wh-transfers:transfer:973f32bf-...
+
+  SKU               item_id           delta  avail antes -> despues   on_hand
+  BOL-KRAFT         54893766246712     +80        13 ->  93           13 ->  93
+  PER-AURMIS-100    47057568497976     +24         3 ->  27            3 ->  27
+  PER-CABGLO-100    54897981882680     +24         0 ->  24            0 ->  24
+  PER-ELEETE-100    54286740652344     +24         0 ->  24            0 ->  24
+  PER-ELEROM-100    51096151523640     +24         6 ->  30            6 ->  30
+  PER-ESEDIV-100    47379308446008     +24         0 ->  24            0 ->  24
+  PER-ESEITA-100    54897995055416     +24        -1 ->  23  (*)      -1 ->  23
+  PER-FORSED-100    50358615900472     +24         0 ->  24  (**)      1 ->  25
+  PER-HORAZU-100    47059514818872     +24         8 ->  32  (**)     10 ->  34
+  PER-SUSCOS-100    51096156569912     +24         2 ->  26            2 ->  26
+                                      ----
+                                      +296
+
+   (*) Partia de -1 por una venta real contra stock que Shopify creia
+       inexistente. Terminar en 23 y no en 24 es el RESULTADO CORRECTO; no se
+       forzo a 24.
+  (**) available != on_hand por unidades committed (1 y 2 respectivamente).
+       Baseline usado: available. Los committed se preservaron.
+
+4.5 PLANTA — NO SE TOCO
+--------------------------------------------------------------------------------
+  Ninguna de las 14 lineas menciono gid://shopify/Location/103584596280.
+  Verificado por lectura ANTES y DESPUES en los 10 SKUs. Sin un solo cambio:
+
+      BOL-KRAFT 3040 · AURMIS 44 · CABGLO 0 · ELEETE 0 · ELEROM 12
+      ESEDIV 17 · ESEITA 0 · FORSED 10 · HORAZU 22 · SUSCOS 8
+
+  Era la ventaja de esta via: Planta ya reflejaba la salida fisica real del
+  2026-09-01, asi que sumar solo en destino no genera doble conteo y no
+  requiere compensacion.
+
+4.6 NOTA DE METODO — POR QUE LA RELECTURA NO ERA OPCIONAL
+--------------------------------------------------------------------------------
+  En la tanda de Conquista la mutacion devolvio quantityAfterChange = null en
+  las 8 entradas de cambio, pese a userErrors vacio. Fiarse de la respuesta de
+  la mutacion no habria confirmado nada. TODA la verificacion de este documento
+  proviene de relecturas independientes posteriores, no de la respuesta de la
+  escritura. Mismo criterio aplicado en Ceiba.
+
+  Se ejecuto una sola llamada atomica por tanda en vez de N llamadas sueltas:
+  el compare-and-swap sigue siendo por linea, pero se elimina el riesgo de
+  estado parcial. Es tambien el patron de adjustShopifyPlantaInventory.
+
+4.7 SUPABASE
+--------------------------------------------------------------------------------
+  Un evento shopify_backfill_direct_adjust por transferencia (HTTP 201):
+
+    #EC3C2698  id c88fb246-7710-4e68-b51d-a0121476e75a  2026-09-06 14:40:16 -07
+    #973F32BF  id 6f4d11fa-71e5-4d23-9f4b-6045238fdd6b  2026-09-06 14:44:41 -07
+
+  Cada detail incluye: motivo con la causa raiz, method
+  "inventoryAdjustQuantities", no_inventory_transfer_created:true, nota de
+  trazabilidad, fecha fisica real (2026-09-01) vs fecha del ajuste, picking de
+  Odoo, AdjustmentGroup, planta_tocada:false con justificacion, las lineas con
+  antes/despues de available y on_hand, y puntero a este documento.
+
+  Bitacora final de ambas:
+    transfer_created -> shopify_transfer_create_error -> shopify_sync_error
+    -> transfer_received -> shopify_backfill_direct_adjust
+
+  NO SE MODIFICO: shopify_transfer_id sigue NULL en las 14 filas (verificado),
+  status sigue 'validated', odoo_transfer_id sigue WH/INT/00314 y WH/INT/00315.
+  Dejar shopify_transfer_id en NULL es DELIBERADO: refleja la realidad de que
+  no existe ninguna transferencia en Shopify para estos registros.
+
+4.8 LO QUE NO SE TOCO EN NINGUN MOMENTO
+--------------------------------------------------------------------------------
+  · ODOO: cero escrituras en esta parte. Los pickings 42309 y 42310 siguen
+    'done' e intactos.
+  · Shopify Planta: cero escrituras (4.5).
+  · Supabase status / odoo_transfer_id / shopify_transfer_id: sin cambios.
+
+4.9 PENDIENTES ANOTADOS, SIN ACCION (confirmados tras la reposicion)
+--------------------------------------------------------------------------------
+  · DESFASE DE PLANTA en los 3 SKUs reparados: CABGLO 0, ELEETE 0, ESEITA 0 en
+    Shopify contra 10, 10 y 9 en Odoo. Es un desfase PREVIO al incidente, no lo
+    genero esta operacion. Ahora que los x_shopify_inventory_item_id estan
+    arreglados, deberia curarse solo en el proximo stock.move 'done' de cada
+    SKU, via la automatizacion "Sincronizar Inventario a Shopify (stock.move)".
+    Si no se quiere esperar, se corrige aparte.
+
+  · 7 SKUs DE 30 ML con desfases Odoo/Planta ajenos a este incidente:
+      PER-FUEIMP-30  odooWH= 0  shopifyPlanta= 40   delta +40
+      PER-DOMSUP-30  odooWH= 0  shopifyPlanta=-39   delta -39
+      PER-SUSCOS-30  odooWH= 0  shopifyPlanta= 38   delta +38
+      PER-VICMAG-30  odooWH=29  shopifyPlanta=  0   delta -29
+      PER-EMPOSC-30  odooWH=21  shopifyPlanta=  0   delta -21
+      PER-HORAZU-30  odooWH=20  shopifyPlanta=  0   delta -20
+      PER-VERINF-30  odooWH=10  shopifyPlanta=  0   delta -10
+    Causa no investigada. Sin accion en esta tarea.
+
+  · ATENCION — LAS TRES TRANSFERENCIAS DE 2026-02-26 (d9f6450c / 9f3e57da /
+    f33e4639, pickings WH/INT/00213, 00210 y 00212). Su CAUSA de codigo quedo
+    resuelta en su momento (@idempotent / InventoryTransferCreateInput), pero
+    NO SE VERIFICO NUNCA si sus unidades llegaron a reflejarse en Shopify.
+    Siguen 'validated' a tienda con shopify_transfer_id NULL, igual que
+    estaban estas dos. PUEDE HABER UN DESCUADRE ADICIONAL AHI. No se
+    investigo porque queda fuera del alcance autorizado. RECOMENDADO REVISARLO.
+
+  · LOS TRES DEFECTOS DE CODIGO DE 1.6 SIGUEN VIVOS EN PRODUCCION. Reparar los
+    datos y reponer el inventario no repara el mecanismo: el proximo ID mal
+    capturado vuelve a producir una perdida silenciosa. Blindaje sugerido en
+    3.8.
+
+
+================================================================================
+APENDICE — IDENTIFICADORES DE REFERENCIA
+================================================================================
+
+  SUPABASE     proyecto  bszfkudigjiqddliicri
+               EF        transfers (v48)
+
+  ODOO         url       aromantemx.odoo.com
+               db        aromante-aromante-master-20090002
+               ubicaciones:
+                  8   WH/Existencias                          internal
+                 14   Virtual Locations/Inventory adjustment  inventory
+                 15   Virtual Locations/Production            production
+                 28   P-CON/Existencias                       internal
+                 36   P-CEI/Existencias                       internal
+                 43   .../Traslado interno a Kroni            transit
+
+  SHOPIFY      tienda    Aromante · aromante.mx · Shopify Plus · MXN
+               ubicaciones:
+                 103584596280   1 - Aromante Planta Productora
+                  98632499512   2 - Kroni
+                 107414356280   Aromante La Ceiba - Culiacan, Sinaloa
+                  80271802680   Aromante La Conquista - Culiacan, Sinaloa
+
+  INVENTORY ITEM IDS de los SKUs implicados (verificados en vivo 2026-09-06):
+                 54893766246712   BOL-KRAFT
+                 47057568497976   PER-AURMIS-100
+                 54897981882680   PER-CABGLO-100   (reparado)
+                 54286740652344   PER-ELEETE-100   (reparado)
+                 51096151523640   PER-ELEROM-100
+                 47379308446008   PER-ESEDIV-100
+                 54897995055416   PER-ESEITA-100   (reparado)
+                 50358615900472   PER-FORSED-100
+                 47059514818872   PER-HORAZU-100
+                 51096156569912   PER-SUSCOS-100
+
+  ARCHIVOS DE EVIDENCIA (docs/evidencia-2026-09-06/):
+                 snapshot_before.json   3 productos x 199 campos, 19551 bytes
+                 snapshot_after.json    3 productos x 199 campos, 19551 bytes
+
+================================================================================
+FIN DEL DOCUMENTO
+================================================================================

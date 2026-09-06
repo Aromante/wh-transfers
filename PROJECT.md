@@ -218,6 +218,92 @@ Al validar una transferencia WH/Existencias → KRONI/Existencias:
 
 ---
 
+## Incidente 2026-09-01 — Transferencias validadas que nunca llegaron a Shopify
+
+**Estado: dato corregido y inventario repuesto. El mecanismo que permitió la pérdida silenciosa SIGUE ACTIVO (ver riesgo conocido más abajo).**
+
+Documentos de evidencia:
+- [`docs/INCIDENTE-SHOPIFY-TRANSFERS-2026-09-06.txt`](docs/INCIDENTE-SHOPIFY-TRANSFERS-2026-09-06.txt) — diagnóstico forense completo (914 líneas)
+- [`docs/ACTA-CIERRE-REPOSICION-2026-09-06.txt`](docs/ACTA-CIERRE-REPOSICION-2026-09-06.txt) — acta de ejecución y cierre (517 líneas)
+- [`docs/evidencia-2026-09-06/`](docs/evidencia-2026-09-06/) — snapshots Odoo antes/después (199 campos × 3 productos)
+
+### Qué pasó
+
+Las transferencias `#973F32BF` (WH→Ceiba, 296 u) y `#EC3C2698` (WH→Conquista, 152 u) se completaron sin error visible el 2026-09-01: Odoo movió el stock (pickings `WH/INT/00315` y `WH/INT/00314`, ambos `done`), Supabase quedó en `status='validated'` y la app mostró pantalla verde. **Shopify nunca registró nada.** Descuadre: 448 unidades.
+
+### Causa raíz
+
+Tres productos tenían en Odoo un **ProductVariant ID** de Shopify guardado en `product.product.x_shopify_inventory_item_id`, campo que debe llevar el **InventoryItem ID**:
+
+| SKU | Guardado (malo) | Correcto |
+|-----|-----------------|----------|
+| `PER-CABGLO-100` | `52825562841400` (variant) | `54897981882680` |
+| `PER-ELEETE-100` | `52224875594040` (variant) | `54286740652344` |
+| `PER-ESEITA-100` | `52825576210744` (variant) | `54897995055416` |
+
+Escritos el 2026-08-27 23:59:12 UTC por `write_uid=[2,"Admin"]`, en un lote manual de 7 productos donde 4 quedaron bien y 3 mal. El campo es un `char` de Odoo Studio **sin validación de tipo ni de formato**.
+
+Shopify respondió a `inventoryTransferCreate` con `"The inventory item could not be found."` en las líneas afectadas. **La mutación es atómica**: no se creó nada, ni siquiera las 7 líneas sanas del envío de Ceiba.
+
+Hipótesis descartada con evidencia: **no** fue un cambio de la API 2025-10. El código no cambió entre las transferencias buenas (25 y 26 de agosto) y las malas; el último commit es del 2026-04-06. Cambió el dato en Odoo.
+
+### Corrección aplicada en Odoo (2026-09-06)
+
+Los 3 `x_shopify_inventory_item_id` reparados en producción, con guardas previas (releer y abortar si el `default_code` o el valor actual no eran los esperados). Diff sobre snapshot completo de 199 campos: **solo cambió el campo objetivo y `write_date`**. Verificación funcional posterior: los 3 IDs nuevos resuelven como `InventoryItem` con el SKU correcto; los 3 viejos devuelven `null` — exactamente la condición que producía el error.
+
+Re-auditoría del mapeo completo contra Shopify en vivo: **130/130** resuelven y su `sku` coincide con el `default_code` de Odoo. 0 IDs muertos, 0 cruces, 0 duplicados. No hay un cuarto caso.
+
+### Reposición en Shopify (2026-09-06)
+
+Decisión del responsable: **ajuste directo de inventario en destino**, no réplica de la transferencia. Trade-off aceptado explícitamente: en el historial de Shopify queda como ajuste manual, no como movimiento entre ubicaciones.
+
+| Tanda | Ubicación | Líneas | Unidades | AdjustmentGroup |
+|-------|-----------|--------|----------|-----------------|
+| 1 (canario) | Conquista `80271802680` | 4 | +152 | `77648889708856` |
+| 2 | Ceiba `107414356280` | 10 | +296 | `77648974840120` |
+
+`inventoryAdjustQuantities`, `reason: "correction"`, `name: "available"`, una llamada atómica por tanda, `changeFromQuantity` leído en vivo por línea. 14/14 verificadas por relectura independiente. 0 `userErrors`.
+
+**Planta no se tocó** (verificado antes y después en los 10 SKUs): ya reflejaba la salida física real, así que sumar solo en destino no genera doble conteo. Odoo tampoco se tocó. `shopify_transfer_id` se dejó deliberadamente en `NULL` en las 14 filas, porque no existe ninguna transferencia real en Shopify para esos registros; la trazabilidad vive en `transfer_logs`, evento `shopify_backfill_direct_adjust`.
+
+> **Nota de método:** la mutación devolvió `quantityAfterChange: null` pese a `userErrors: []`. Toda verificación de cantidades debe hacerse por relectura independiente, nunca confiando en la respuesta de la escritura.
+
+### ⚠️ Riesgo conocido — sin resolver todavía
+
+**El dato ya se corrigió, pero el mecanismo que permitió la pérdida silenciosa sigue activo en producción.** El próximo `x_shopify_inventory_item_id` mal capturado vuelve a producir exactamente el mismo resultado: mutación atómica que falla completa, HTTP 200, pantalla verde para el operador y descuadre invisible.
+
+| # | Defecto | Ubicación | Efecto |
+|---|---------|-----------|--------|
+| (a) | **Fallback todo-o-nada** | `routes-transfer.ts:537` | `if (itemQtyMap.size === 0 && ...)` — el fallback a `resolveVariantsBatch` solo corre si fallan **todos** los SKUs. Con 7 de 10 resueltos nunca se activó. Además solo cubre "campo vacío", no "campo con valor inválido": un ID presente pero muerto pasa directo a Shopify. |
+| (b) | **El error no llega a la UI** | `routes-transfer.ts:589` + `ReceivePage.tsx:231` | El `catch` registra en `transfer_logs` y sigue; la respuesta sale `HTTP 200` con `status='validated'`. En el front, `if (r.ok) setResult({ ok: true })` — **`d.shopify.error` no se lee en ninguna parte**. El operador ve éxito. |
+| (c) | **Sin reintento ni resync** | rutas de la EF | No existe endpoint para reintentar el tramo Shopify. Una vez que `/receive` responde, la transferencia queda `validated` para siempre sin camino de recuperación. |
+| (d) | **Idempotencia muerta** | `shopify.ts` | `deriveIdempotencyKey()` calcula `createKey`, `readyKey`, `shipmentKey`, `inTransitKey` y `receiveKey` — y **ninguna se usa** en las mutaciones. El `@idempotent` se quitó tras los errores de feb-2026 y quedó el cálculo huérfano. No hay protección contra duplicados. |
+
+Blindaje: (a) y (b) más la validación previa de IDs se atacan primero; **(c) y (d) quedan pospuestos a una sesión aparte** por ser cambios de arquitectura mayores.
+
+### 📌 Pendiente de investigación — posible descuadre adicional
+
+Las tres transferencias del **2026-02-26** siguen `validated` a tienda con `shopify_transfer_id` NULL, exactamente como estaban estas dos:
+
+| Transfer | Picking | Destino |
+|----------|---------|---------|
+| `d9f6450c` | `WH/INT/00213` | P-CEI/Existencias |
+| `9f3e57da` | `WH/INT/00210` | P-CEI/Existencias |
+| `f33e4639` | `WH/INT/00212` | P-CEI/Existencias |
+
+Su **causa de código** quedó resuelta en su momento (`Directive @idempotent is not defined` e `InventoryTransferCreateInput isn't a defined input type`). Pero **nunca se verificó si sus unidades llegaron a reflejarse en Shopify**. Puede haber un descuadre adicional ahí. Sin investigar, fuera del alcance autorizado en su momento. **Recomendado revisarlo.**
+
+### Correcciones factuales a este documento
+
+Verificadas contra producción durante el incidente, difieren de lo que decía este PROJECT.md:
+
+- **Versión de la EF:** v48 (commit `d09b21c`, 2026-04-06), no v22.
+- **Tablas:** no existen `transfers` ni `shopify_transfer_drafts`. El esquema real es `transfer_lines` (una fila por SKU con las columnas de cabecera repetidas), `transfer_logs`, la vista `transfer_summary`, `transfer_boxes`, `transfer_locations` y `transfer_transit`.
+- **Mapeo de ubicaciones:** `getShopifyLocationGid()` lo resuelve leyendo `transfer_locations.gid` desde Supabase, no desde un `ODOO_TO_SHOPIFY_LOCATION_GID` hardcodeado.
+- **Rama de producción:** `main`. `origin/master` es una copia rezagada en v45.
+
+---
+
 ## Pendientes / Mejoras futuras
 
 - Smoke tests (Vitest) para validación de líneas y confirmación de submit.
