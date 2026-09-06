@@ -228,7 +228,24 @@ export default function ReceivePage() {
       const data = await r.json()
       if (r.ok) {
         const d = data?.data || data
-        setResult({ ok: true, pickingName: d?.picking_name, pickingId: d?.picking_id, state: d?.state, shopifyTransferId: d?.shopify_transfer_id, message: d?.message })
+        // Odoo puede haber terminado bien y Shopify no. El backend lo dice en
+        // shopify_ok / shopify_warning; si no viene (EF antigua), se deduce del
+        // objeto shopify. No pintar "todo OK" sin comprobarlo: incidente 2026-09-01.
+        const shopifyInfo = d?.shopify || {}
+        const shopifyOk = d?.shopify_ok ?? !(shopifyInfo.error || shopifyInfo.failed_skus?.length)
+        const shopifyWarning = d?.shopify_warning
+          ?? (shopifyInfo.error ? `Shopify no se actualizó: ${shopifyInfo.error}` : null)
+        setResult({
+          ok: true,
+          pickingName: d?.picking_name,
+          pickingId: d?.picking_id,
+          state: d?.state,
+          shopifyTransferId: d?.shopify_transfer_id,
+          message: d?.message,
+          shopifyOk,
+          shopifyWarning,
+          failedSkus: shopifyInfo.failed_skus || [],
+        })
         await loadPending()
       } else {
         setResult({ ok: false, error: data?.error || `Error ${r.status}` })
@@ -675,10 +692,18 @@ export default function ReceivePage() {
               <>
                 {result.ok ? (
                   <div className="flex flex-col items-center py-4 gap-3">
-                    <div className="h-12 w-12 rounded-full bg-green-100 flex items-center justify-center">
-                      <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
-                    </div>
-                    <h3 className="text-lg font-semibold text-slate-900">Recepción confirmada</h3>
+                    {result.shopifyOk === false ? (
+                      <div className="h-12 w-12 rounded-full bg-amber-100 flex items-center justify-center">
+                        <svg className="h-6 w-6 text-amber-600" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                      </div>
+                    ) : (
+                      <div className="h-12 w-12 rounded-full bg-green-100 flex items-center justify-center">
+                        <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+                      </div>
+                    )}
+                    <h3 className="text-lg font-semibold text-slate-900">
+                      {result.shopifyOk === false ? 'Recepción confirmada en Odoo' : 'Recepción confirmada'}
+                    </h3>
                     <div className="w-full space-y-1.5">
                       {result.pickingName && (
                         <a
@@ -709,6 +734,30 @@ export default function ReceivePage() {
                         </a>
                       )}
                     </div>
+
+                    {/* El tramo de Shopify puede fallar aunque Odoo haya quedado
+                        correcto. El operador tiene que verlo: incidente 2026-09-01. */}
+                    {result.shopifyOk === false && (
+                      <div className="w-full rounded-lg border border-amber-300 bg-amber-50 p-3 text-left">
+                        <p className="text-sm font-semibold text-amber-900">
+                          {result.shopifyWarning || 'Shopify no se actualizó.'}
+                        </p>
+                        {result.failedSkus?.length > 0 && (
+                          <ul className="mt-2 space-y-0.5">
+                            {result.failedSkus.map((f: any) => (
+                              <li key={f.sku} className="font-mono text-xs text-amber-800">
+                                {f.sku} — {f.reason}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <p className="mt-2 text-xs text-amber-800">
+                          El stock sí se movió en Odoo. Avisa a sistemas para reponer el inventario
+                          en Shopify antes de vender estas piezas.
+                        </p>
+                      </div>
+                    )}
+
                     <button onClick={closeModal} className="mt-2 w-full rounded-lg bg-black text-white px-4 py-2.5 text-sm font-medium">
                       Aceptar
                     </button>

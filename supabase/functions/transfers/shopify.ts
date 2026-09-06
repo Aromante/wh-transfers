@@ -84,6 +84,185 @@ export async function resolveVariantsBatch(env: Env, codesIn: string[]) {
     return map
 }
 
+// ── Validación previa de inventory item ids ──────────────────────────────────
+// Incidente 2026-09-01: tres productos tenían un ProductVariant ID guardado en
+// Odoo (x_shopify_inventory_item_id) en lugar del InventoryItem ID. Shopify
+// rechazó inventoryTransferCreate entero — es atómico — y se perdieron 448
+// unidades en silencio. Esta función detecta ese caso ANTES de mandar nada.
+//
+// Read-only: resuelve cada GID con node() y confirma que (a) existe y es un
+// InventoryItem, y (b) su sku corresponde al producto de Odoo que dice ser.
+
+export type ItemCandidate = {
+    /** clave de la línea tal como llegó (sku o barcode) */
+    lineKey: string
+    inventoryItemId: number
+    /** códigos aceptables para este item: default_code y barcode de Odoo */
+    expectedCodes: string[]
+}
+
+export type ItemCheck = {
+    lineKey: string
+    inventoryItemId: number
+    reason: 'not_found' | 'sku_mismatch'
+    shopifySku?: string | null
+}
+
+export async function validateInventoryItemIds(
+    env: Env,
+    candidates: ItemCandidate[],
+): Promise<{ ok: ItemCandidate[]; bad: ItemCheck[] }> {
+    const ok: ItemCandidate[] = []
+    const bad: ItemCheck[] = []
+    if (!candidates.length) return { ok, bad }
+
+    const q = `query($ids:[ID!]!){ nodes(ids:$ids){ __typename ... on InventoryItem { id sku } } }`
+
+    for (const part of chunk(candidates, 100)) {
+        const ids = part.map(c => `gid://shopify/InventoryItem/${c.inventoryItemId}`)
+        const data = await shopifyGraphQL(env, q, { ids })
+        const nodes: any[] = data?.nodes || []
+        // nodes() preserva el orden de los ids pedidos
+        part.forEach((cand, i) => {
+            const node = nodes[i]
+            if (!node || node.__typename !== 'InventoryItem') {
+                bad.push({ lineKey: cand.lineKey, inventoryItemId: cand.inventoryItemId, reason: 'not_found' })
+                return
+            }
+            const shopifySku = normCode(node.sku || '')
+            const expected = cand.expectedCodes.map(c => normCode(c).toLowerCase()).filter(Boolean)
+            // Si Shopify no expone sku no se puede cruzar: el item existe, se acepta.
+            if (!shopifySku || !expected.length || expected.includes(shopifySku.toLowerCase())) {
+                ok.push(cand)
+            } else {
+                bad.push({
+                    lineKey: cand.lineKey,
+                    inventoryItemId: cand.inventoryItemId,
+                    reason: 'sku_mismatch',
+                    shopifySku,
+                })
+            }
+        })
+    }
+    return { ok, bad }
+}
+
+// ── Resolución de inventory items para un conjunto de líneas ─────────────────
+// Punto único donde se decide qué inventoryItemId se manda a Shopify.
+// Antes del incidente, esta lógica estaba duplicada en tres bloques de
+// routes-transfer.ts, y el fallback era todo-o-nada: solo corría si NINGÚN SKU
+// resolvía. Con 7 de 10 resueltos nunca se activaba, y los 3 IDs inválidos
+// tumbaban el envío completo.
+//
+// Ahora: por-SKU. Un SKU que falla la validación se reintenta individualmente
+// contra Shopify y, si tampoco así resuelve, se reporta sin bloquear a los demás.
+
+export type ResolvedItems = {
+    itemQtyMap: Map<number, number>
+    /** SKUs que no se pudieron resolver ni por Odoo ni por Shopify */
+    failed: Array<{ sku: string; reason: string; detail?: string }>
+    stats: {
+        fromOdoo: number
+        fromFallback: number
+        invalidOdooIds: number
+        missingOdooIds: number
+    }
+}
+
+export async function resolveInventoryItemsForLines(
+    env: Env,
+    linesBySku: Map<string, number>,
+    prodMap: Map<string, { shopify_inventory_item_id: number | null; default_code?: string; barcode?: string }>,
+    logFn?: (event: string, data: any) => Promise<void>,
+): Promise<ResolvedItems> {
+    const itemQtyMap = new Map<number, number>()
+    const failed: ResolvedItems['failed'] = []
+    const stats = { fromOdoo: 0, fromFallback: 0, invalidOdooIds: 0, missingOdooIds: 0 }
+
+    const add = (itemId: number, qty: number) => {
+        itemQtyMap.set(itemId, (itemQtyMap.get(itemId) || 0) + qty)
+    }
+
+    // 1) Candidatos con id en Odoo · 2) líneas sin id en Odoo
+    const candidates: ItemCandidate[] = []
+    const needFallback: string[] = []
+    for (const [sku] of linesBySku) {
+        const prod = prodMap.get(sku)
+        if (prod?.shopify_inventory_item_id) {
+            candidates.push({
+                lineKey: sku,
+                inventoryItemId: prod.shopify_inventory_item_id,
+                expectedCodes: [prod.default_code || '', prod.barcode || '', sku].filter(Boolean),
+            })
+        } else {
+            needFallback.push(sku)
+            stats.missingOdooIds++
+        }
+    }
+
+    // 3) Validación read-only contra Shopify — ANTES de construir el payload
+    let bad: ItemCheck[] = []
+    try {
+        const res = await validateInventoryItemIds(env, candidates)
+        for (const c of res.ok) {
+            add(c.inventoryItemId, linesBySku.get(c.lineKey) || 0)
+            stats.fromOdoo++
+        }
+        bad = res.bad
+    } catch (e: any) {
+        // Si la validación misma falla (red, rate limit), no se bloquea el envío:
+        // se cae al comportamiento previo y se registra.
+        await logFn?.('shopify_item_validation_error', { error: String(e?.message || e), candidates: candidates.length })
+        for (const c of candidates) {
+            add(c.inventoryItemId, linesBySku.get(c.lineKey) || 0)
+            stats.fromOdoo++
+        }
+        candidates.length = 0
+    }
+
+    if (bad.length) {
+        stats.invalidOdooIds = bad.length
+        await logFn?.('shopify_item_id_invalid', {
+            reason: 'odoo_shopify_item_ids_invalid',
+            detail: 'Un x_shopify_inventory_item_id de Odoo no resuelve como InventoryItem en Shopify, o pertenece a otro producto. Se reintenta por SKU.',
+            items: bad.map(b => ({ sku: b.lineKey, inventory_item_id: b.inventoryItemId, reason: b.reason, shopify_sku: b.shopifySku ?? null })),
+        })
+        for (const b of bad) needFallback.push(b.lineKey)
+    }
+
+    // 4) Fallback POR-SKU (no todo-o-nada): cubre "campo vacío" y "campo inválido"
+    if (needFallback.length) {
+        await logFn?.('shopify_item_lookup_fallback', {
+            reason: bad.length ? 'invalid_or_missing_odoo_item_ids' : 'odoo_shopify_item_ids_missing',
+            missing_skus: needFallback,
+        })
+        try {
+            const shopifyVariants = await resolveVariantsBatch(env, needFallback)
+            for (const sku of needFallback) {
+                const itemGid: string | undefined = shopifyVariants.get(normCode(sku))?.inventoryItem?.id
+                const numericId = itemGid ? Number(gidToLegacyId(itemGid)) : 0
+                if (numericId) {
+                    add(numericId, linesBySku.get(sku) || 0)
+                    stats.fromFallback++
+                } else {
+                    failed.push({ sku, reason: 'not_resolvable_in_shopify', detail: 'Sin inventory item id válido en Odoo y sin variante con ese SKU/barcode en Shopify.' })
+                }
+            }
+        } catch (fallbackErr: any) {
+            await logFn?.('shopify_item_lookup_fallback_error', { error: String(fallbackErr?.message || fallbackErr) })
+            for (const sku of needFallback) {
+                failed.push({ sku, reason: 'fallback_error', detail: String(fallbackErr?.message || fallbackErr) })
+            }
+        }
+    }
+
+    if (failed.length) {
+        await logFn?.('shopify_items_unresolved', { failed, stats })
+    }
+
+    return { itemQtyMap, failed, stats }
+}
+
 export async function getAvailableAtLocation(env: Env, inventoryItemGid: string, locationGid: string) {
     const itemId = gidToLegacyId(inventoryItemGid), locId = gidToLegacyId(locationGid)
     const data = await shopifyRest(env, '/inventory_levels.json', { inventory_item_ids: itemId, location_ids: locId })

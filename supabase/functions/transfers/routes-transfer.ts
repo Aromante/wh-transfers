@@ -10,9 +10,21 @@
 // Source: Odoo stock.location id=43 — update here if the location is ever recreated in Odoo
 const KRONI_TRANSIT_LOC_ID = 43
 
-import { type Env, getOwner, gidToLegacyId } from './helpers.ts'
+import { type Env, getOwner } from './helpers.ts'
 import { createOdooPickingFromLines, findProductsByCodes, getStockAtLocation } from './odoo.ts'
-import { syncShopifyTransfer, adjustShopifyPlantaInventory, resolveVariantsBatch } from './shopify.ts'
+import { syncShopifyTransfer, adjustShopifyPlantaInventory, resolveInventoryItemsForLines } from './shopify.ts'
+
+/** Resultado del tramo Shopify, tal como viaja en la respuesta de /receive. */
+type ShopifySyncResult = {
+    synced: number
+    skipped: number
+    error?: string
+    transferGid?: string
+    /** SKUs que no se pudieron resolver ni por Odoo ni por Shopify */
+    failed_skus?: Array<{ sku: string; reason: string; detail?: string }>
+    /** Aviso legible cuando la sincronización fue parcial */
+    warning?: string
+}
 import { createKroniReception, type BoxInfo } from './kroni.ts'
 import {
     sbInsert,
@@ -216,35 +228,15 @@ export async function handleCreateTransfer(req: Request, env: Env) {
 
         // 2. Shopify: adjust Planta inventory (negate)
         try {
-            const itemQtyMap = new Map<number, number>()
-            for (const [sku, qty] of requestedBySku) {
-                const prod = prodMap.get(sku)
-                if (prod?.shopify_inventory_item_id) {
-                    itemQtyMap.set(
-                        prod.shopify_inventory_item_id,
-                        (itemQtyMap.get(prod.shopify_inventory_item_id) || 0) + qty,
-                    )
-                }
-            }
-            // Fallback: resolve from Shopify if Odoo doesn't have item IDs
-            if (itemQtyMap.size === 0 && requestedBySku.size > 0) {
-                try {
-                    const shopifyVariants = await resolveVariantsBatch(env, [...requestedBySku.keys()])
-                    for (const [sku, qty] of requestedBySku) {
-                        const variant = shopifyVariants.get(sku)
-                        const itemGid: string | undefined = variant?.inventoryItem?.id
-                        if (itemGid) {
-                            const numericId = Number(gidToLegacyId(itemGid))
-                            if (numericId) {
-                                itemQtyMap.set(numericId, (itemQtyMap.get(numericId) || 0) + qty)
-                            }
-                        }
-                    }
-                } catch (fallbackErr: any) {
-                    await sbLogTransfer(env, transferId, 'kroni_early_shopify_fallback_error', {
-                        error: String(fallbackErr?.message || fallbackErr),
-                    })
-                }
+            // Misma validación previa + fallback por-SKU que el flujo de tienda.
+            const { itemQtyMap, failed } = await resolveInventoryItemsForLines(
+                env,
+                requestedBySku,
+                prodMap,
+                (event, data) => sbLogTransfer(env, transferId, event, data),
+            )
+            if (failed.length) {
+                kroniEarlySync.error = `Shopify: ${failed.length} SKU(s) sin resolver (${failed.map(f => f.sku).join(', ')})`
             }
 
             if (itemQtyMap.size > 0) {
@@ -390,27 +382,13 @@ export async function handleReceiveTransfer(req: Request, env: Env) {
             try {
                 const skus = [...linesBySku.keys()]
                 const kroniProdMap = await findProductsByCodes(env, skus)
-                const itemQtyMap = new Map<number, number>()
-                for (const [sku, qty] of linesBySku) {
-                    const prod = kroniProdMap.get(sku)
-                    if (prod?.shopify_inventory_item_id) {
-                        itemQtyMap.set(
-                            prod.shopify_inventory_item_id,
-                            (itemQtyMap.get(prod.shopify_inventory_item_id) || 0) + qty,
-                        )
-                    }
-                }
-                if (itemQtyMap.size === 0 && linesBySku.size > 0) {
-                    const shopifyVariants = await resolveVariantsBatch(env, [...linesBySku.keys()])
-                    for (const [sku, qty] of linesBySku) {
-                        const variant = shopifyVariants.get(sku)
-                        const itemGid: string | undefined = variant?.inventoryItem?.id
-                        if (itemGid) {
-                            const numericId = Number(gidToLegacyId(itemGid))
-                            if (numericId) itemQtyMap.set(numericId, (itemQtyMap.get(numericId) || 0) + qty)
-                        }
-                    }
-                }
+                // Misma validación previa + fallback por-SKU que el flujo de tienda.
+                const { itemQtyMap } = await resolveInventoryItemsForLines(
+                    env,
+                    linesBySku,
+                    kroniProdMap,
+                    (event, data) => sbLogTransfer(env, transfer_id, event, data),
+                )
                 if (itemQtyMap.size > 0) {
                     await adjustShopifyPlantaInventory(
                         env, itemQtyMap,
@@ -518,45 +496,25 @@ export async function handleReceiveTransfer(req: Request, env: Env) {
     }
 
     // ── Shopify inventory sync (AWAITED) ─────────────────────────────────────
-    let shopifyResult: { synced: number; skipped: number; error?: string; transferGid?: string } = { synced: 0, skipped: 0 }
+    // Los inventory item ids se VALIDAN contra Shopify antes de construir el
+    // payload, y los que fallan se reintentan por SKU sin bloquear a los demás.
+    // Ver resolveInventoryItemsForLines() en shopify.ts e incidente 2026-09-01.
+    let shopifyResult: ShopifySyncResult = { synced: 0, skipped: 0 }
     try {
         const skus = [...linesBySku.keys()]
         const prodMap = await findProductsByCodes(env, skus)
-        const itemQtyMap = new Map<number, number>()
-        for (const [sku, qty] of linesBySku) {
-            const prod = prodMap.get(sku)
-            if (prod?.shopify_inventory_item_id) {
-                itemQtyMap.set(
-                    prod.shopify_inventory_item_id,
-                    (itemQtyMap.get(prod.shopify_inventory_item_id) || 0) + qty,
-                )
-            }
-        }
-        // Fallback: if Odoo x_shopify_inventory_item_id is not populated,
-        // resolve inventory item IDs directly from Shopify by SKU/barcode
+        const resolved = await resolveInventoryItemsForLines(
+            env,
+            linesBySku,
+            prodMap,
+            (event, data) => sbLogTransfer(env, transfer_id, event, data),
+        )
+        const itemQtyMap = resolved.itemQtyMap
+        if (resolved.failed.length) shopifyResult.failed_skus = resolved.failed
+
         if (itemQtyMap.size === 0 && linesBySku.size > 0) {
-            const missingSkus = [...linesBySku.keys()].filter(sku => !prodMap.get(sku)?.shopify_inventory_item_id)
-            await sbLogTransfer(env, transfer_id, 'shopify_item_lookup_fallback', {
-                reason: 'odoo_shopify_item_ids_missing',
-                missing_skus: missingSkus,
-            })
-            try {
-                const shopifyVariants = await resolveVariantsBatch(env, [...linesBySku.keys()])
-                for (const [sku, qty] of linesBySku) {
-                    const variant = shopifyVariants.get(sku)
-                    const itemGid: string | undefined = variant?.inventoryItem?.id
-                    if (itemGid) {
-                        const numericId = Number(gidToLegacyId(itemGid))
-                        if (numericId) {
-                            itemQtyMap.set(numericId, (itemQtyMap.get(numericId) || 0) + qty)
-                        }
-                    }
-                }
-            } catch (fallbackErr: any) {
-                await sbLogTransfer(env, transfer_id, 'shopify_item_lookup_fallback_error', {
-                    error: String(fallbackErr?.message || fallbackErr),
-                })
-            }
+            shopifyResult.skipped = linesBySku.size
+            shopifyResult.error = `No se pudo resolver ningún producto en Shopify (${resolved.failed.map(f => f.sku).join(', ') || 'sin detalle'}).`
         }
 
         if (itemQtyMap.size > 0) {
@@ -586,13 +544,20 @@ export async function handleReceiveTransfer(req: Request, env: Env) {
                     },
                     transfer_id,
                 )
-                shopifyResult = { synced: result.synced, skipped: result.skipped, transferGid: result.transferGid }
+                shopifyResult = { ...shopifyResult, synced: result.synced, skipped: result.skipped, transferGid: result.transferGid }
             }
+        }
+
+        // Aviso de sincronización parcial: hubo transferencia, pero faltaron SKUs.
+        if (shopifyResult.failed_skus?.length && itemQtyMap.size > 0) {
+            shopifyResult.warning =
+                `Shopify se actualizó parcialmente: ${shopifyResult.failed_skus.length} SKU(s) no se sincronizaron ` +
+                `(${shopifyResult.failed_skus.map(f => f.sku).join(', ')}).`
         }
     } catch (e: any) {
         console.error('Shopify sync failed:', e?.message || e)
         await sbLogTransfer(env, transfer_id, 'shopify_sync_error', { error: (e as Error).message })
-        shopifyResult = { synced: 0, skipped: 0, error: e?.message || String(e) }
+        shopifyResult = { ...shopifyResult, synced: 0, skipped: 0, error: e?.message || String(e) }
     }
 
     await sbLogTransfer(env, transfer_id, 'transfer_received', {
@@ -604,6 +569,11 @@ export async function handleReceiveTransfer(req: Request, env: Env) {
         shopify: shopifyResult,
     })
 
+    // Odoo pudo terminar bien y Shopify no. La respuesta lo dice explícitamente
+    // para que la UI no pueda pintar "todo OK" cuando el inventario de Shopify
+    // no se movió (incidente 2026-09-01).
+    const shopifyOk = !shopifyResult.error && !shopifyResult.failed_skus?.length
+
     return {
         data: {
             transfer_id,
@@ -611,6 +581,10 @@ export async function handleReceiveTransfer(req: Request, env: Env) {
             picking_name: pickingName,
             state: finalState,
             shopify: shopifyResult,
+            shopify_ok: shopifyOk,
+            shopify_warning: shopifyResult.error
+                ? `Shopify no se actualizó: ${shopifyResult.error}`
+                : (shopifyResult.warning || null),
             shopify_transfer_id: shopifyResult.transferGid || null,
             ...(discrepancies.length > 0 ? { discrepancies } : {}),
             message: `Picking ${pickingName} creado en Odoo (${finalState}).`,

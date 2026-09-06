@@ -268,18 +268,36 @@ Decisión del responsable: **ajuste directo de inventario en destino**, no répl
 
 > **Nota de método:** la mutación devolvió `quantityAfterChange: null` pese a `userErrors: []`. Toda verificación de cantidades debe hacerse por relectura independiente, nunca confiando en la respuesta de la escritura.
 
-### ⚠️ Riesgo conocido — sin resolver todavía
+### Blindaje aplicado (2026-09-06) — defectos (a) y (b)
 
-**El dato ya se corrigió, pero el mecanismo que permitió la pérdida silenciosa sigue activo en producción.** El próximo `x_shopify_inventory_item_id` mal capturado vuelve a producir exactamente el mismo resultado: mutación atómica que falla completa, HTTP 200, pantalla verde para el operador y descuadre invisible.
+> ⚠️ **El código está corregido en `main` pero NO DESPLEGADO.** La EF viva sigue siendo la v48 con los defectos. El deploy va por el MCP de Supabase (no hay `SUPABASE_ACCESS_TOKEN` local) y no se pudo hacer desde esta sesión.
+
+**1. Validación previa de `inventoryItemId` — `shopify.ts: validateInventoryItemIds()`**
+
+Antes de construir el payload de `inventoryTransferCreate`, cada ID se resuelve con `node()` (read-only) y se comprueba que (a) existe y es un `InventoryItem`, y (b) su `sku` corresponde al producto de Odoo que dice ser — cruzado contra `default_code` **y** `barcode`, para no marcar falso positivo cuando la línea se capturó por código de barras. El caso del incidente se detecta **antes** de mandar nada, no después del rechazo de Shopify.
+
+**2. Fallback por-SKU — `shopify.ts: resolveInventoryItemsForLines()`**
+
+Punto único donde se decide qué `inventoryItemId` se manda. Sustituye a **tres bloques duplicados** de `routes-transfer.ts` (flujo tienda, KRONI al crear y KRONI al recibir): el defecto estaba en los tres, ahora se corrige en los tres. El fallback ya no es todo-o-nada y cubre las dos formas del problema — *campo vacío* y *campo con valor inválido*. Un SKU que falla se reintenta individualmente contra Shopify; si tampoco resuelve, se reporta en `failed_skus` **sin bloquear a los SKUs sanos del mismo envío**.
+
+Si la validación misma falla (red, rate limit) no se bloquea el envío: se registra `shopify_item_validation_error` y se cae al comportamiento previo.
+
+**3. El error llega a la UI — `routes-transfer.ts` + `ReceivePage.tsx`**
+
+`/receive` devuelve ahora `shopify_ok` y `shopify_warning` además del objeto `shopify`. La pantalla de recepción distingue tres estados: éxito (verde), **"Recepción confirmada en Odoo" con panel ámbar** cuando Shopify no se actualizó o se actualizó parcialmente —con el motivo y la lista de SKUs afectados— y error (rojo). El front tiene fallback para EFs antiguas que no manden los campos nuevos.
+
+**Eventos nuevos en `transfer_logs`:** `shopify_item_id_invalid`, `shopify_items_unresolved`, `shopify_item_validation_error`. El existente `shopify_item_lookup_fallback` ahora distingue `invalid_or_missing_odoo_item_ids` de `odoo_shopify_item_ids_missing`.
+
+**Validación:** 25 aserciones en `supabase/functions/transfers/__tests__/resolve-items.test.ts` (6 casos: regresión normal, el incidente real, SKU irrecuperable, cruce de producto, línea por barcode, y la función de validación aislada). Frontend: `tsc --noEmit` y `vite build` limpios. EF: bundle completo sin imports rotos.
+
+### ⚠️ Riesgo conocido — sin resolver todavía
 
 | # | Defecto | Ubicación | Efecto |
 |---|---------|-----------|--------|
-| (a) | **Fallback todo-o-nada** | `routes-transfer.ts:537` | `if (itemQtyMap.size === 0 && ...)` — el fallback a `resolveVariantsBatch` solo corre si fallan **todos** los SKUs. Con 7 de 10 resueltos nunca se activó. Además solo cubre "campo vacío", no "campo con valor inválido": un ID presente pero muerto pasa directo a Shopify. |
-| (b) | **El error no llega a la UI** | `routes-transfer.ts:589` + `ReceivePage.tsx:231` | El `catch` registra en `transfer_logs` y sigue; la respuesta sale `HTTP 200` con `status='validated'`. En el front, `if (r.ok) setResult({ ok: true })` — **`d.shopify.error` no se lee en ninguna parte**. El operador ve éxito. |
-| (c) | **Sin reintento ni resync** | rutas de la EF | No existe endpoint para reintentar el tramo Shopify. Una vez que `/receive` responde, la transferencia queda `validated` para siempre sin camino de recuperación. |
-| (d) | **Idempotencia muerta** | `shopify.ts` | `deriveIdempotencyKey()` calcula `createKey`, `readyKey`, `shipmentKey`, `inTransitKey` y `receiveKey` — y **ninguna se usa** en las mutaciones. El `@idempotent` se quitó tras los errores de feb-2026 y quedó el cálculo huérfano. No hay protección contra duplicados. |
+| (c) | **Sin reintento ni resync** | rutas de la EF | No existe endpoint para reintentar el tramo Shopify. Una vez que `/receive` responde, la transferencia queda `validated` para siempre sin camino de recuperación automática: hay que reponer a mano, como se hizo con estas dos. |
+| (d) | **Idempotencia muerta** | `shopify.ts` | `deriveIdempotencyKey()` calcula `createKey`, `readyKey`, `shipmentKey`, `inTransitKey` y `receiveKey` — y **ninguna se usa** en las mutaciones. El `@idempotent` se quitó tras los errores de feb-2026 y quedó el cálculo huérfano. No hay protección contra duplicados: un reintento ciego crearía transferencias repetidas. |
 
-Blindaje: (a) y (b) más la validación previa de IDs se atacan primero; **(c) y (d) quedan pospuestos a una sesión aparte** por ser cambios de arquitectura mayores.
+**Próximo paso, en sesión aparte:** (c) y (d) van juntos y en ese orden — un endpoint de reintento sin idempotencia es peligroso, porque el modo de fallo pasa de "faltan unidades" a "sobran unidades duplicadas". Son cambios de arquitectura, no parches.
 
 ### 📌 Pendiente de investigación — posible descuadre adicional
 

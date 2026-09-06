@@ -48,18 +48,38 @@ export async function findProductByCode(env: Env, code: string) {
     return { id: row.id as number, name: row.display_name as string, uom_id: Number(uomId) }
 }
 
+export type OdooProductRef = {
+    id: number
+    name: string
+    uom_id: number
+    shopify_inventory_item_id: number | null
+    /** product.product.default_code — canonical SKU in Odoo */
+    default_code: string
+    /** product.product.barcode */
+    barcode: string
+}
+
 export async function findProductsByCodes(env: Env, codesIn: string[]) {
     const codes = Array.from(new Set(codesIn.map(c => String(c || '').trim()).filter(Boolean)))
-    const map = new Map<string, { id: number; name: string; uom_id: number; shopify_inventory_item_id: number | null }>()
+    const map = new Map<string, OdooProductRef>()
     for (const part of chunk(codes, 80)) {
         const domain = ['|', ['barcode', 'in', part], ['default_code', 'in', part]] as any
         const rows: any[] = await odooExecuteKw(env, 'product.product', 'search_read', [domain], { fields: ['id', 'display_name', 'uom_id', 'barcode', 'default_code', 'x_shopify_inventory_item_id'], limit: 2000 })
         for (const row of rows || []) {
             const uomId = Array.isArray(row.uom_id) ? row.uom_id[0] : row.uom_id
             const shopifyItemId = row.x_shopify_inventory_item_id ? Number(row.x_shopify_inventory_item_id) : null
-            const val = { id: Number(row.id), name: String(row.display_name || ''), uom_id: Number(uomId), shopify_inventory_item_id: shopifyItemId }
             const bc = String(row.barcode || '').trim()
             const sku = String(row.default_code || '').trim()
+            // default_code and barcode are carried so the Shopify item id can be
+            // cross-checked against the product it is supposed to belong to.
+            const val: OdooProductRef = {
+                id: Number(row.id),
+                name: String(row.display_name || ''),
+                uom_id: Number(uomId),
+                shopify_inventory_item_id: shopifyItemId,
+                default_code: sku,
+                barcode: bc,
+            }
             if (bc && !map.has(bc)) map.set(bc, val)
             if (sku && !map.has(sku)) map.set(sku, val)
         }
